@@ -1,0 +1,6 @@
+domains.json
+nodes.json
+config.env
+deployer.log
+*.tmp
+*.ini
