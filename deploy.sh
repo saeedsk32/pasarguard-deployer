@@ -246,19 +246,19 @@ deploy_new_node() {
         eval "$ssh_cmd 'if ! command -v pg-node >/dev/null 2>&1; then sudo bash -c \"\$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)\" @ install-script; fi'" || true
 
         # Run non-interactive native install with exact flags
-        eval "$ssh_cmd 'pg-node install -y --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $SERVICE_PORT --api-port $API_PORT $SYSTEMD_FLAG || true'"
+        eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node install -y --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $SERVICE_PORT --api-port $API_PORT $SYSTEMD_FLAG || true'"
 
         # Double enforce our real SSL certs
         cat "$cert_src" | eval "$ssh_cmd 'cat > /var/lib/pg-node/certs/ssl_cert.pem && cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pasarguard/ssl/cert.pem'"
         cat "$key_src" | eval "$ssh_cmd 'cat > /var/lib/pg-node/certs/ssl_key.pem && cat > /var/lib/pasarguard/ssl/key.pem && chmod 600 /var/lib/pg-node/certs/ssl_key.pem /var/lib/pasarguard/ssl/key.pem'"
 
-        eval "$ssh_cmd 'pg-node restart -n 2>/dev/null || docker restart node 2>/dev/null || true'"
+        eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node restart -n 2>/dev/null || docker restart node 2>/dev/null || true'"
 
         # Comprehensive API Token extraction
         local token_candidate
         token_candidate=$(eval "$ssh_cmd 'grep -oE \"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\" /opt/pg-node/.env /opt/pg-node/docker-compose.yml 2>/dev/null | head -n 1 | cut -d\":\" -f2' || true")
         if [ -z "$token_candidate" ]; then
-            token_candidate=$(eval "$ssh_cmd 'pg-node 2>/dev/null | grep -i \"API Key\" | grep -oE \"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\" | head -n 1' || true")
+            token_candidate=$(eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node 2>/dev/null | grep -i \"API Key\" | grep -oE \"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\" | head -n 1' || true")
         fi
         if [ -n "$token_candidate" ]; then
             node_token="$token_candidate"
@@ -341,7 +341,7 @@ manage_saved_nodes() {
         local live_tok
         live_tok=$(eval "$ssh_cmd 'grep -oE \"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\" /opt/pg-node/.env /opt/pg-node/docker-compose.yml 2>/dev/null | head -n 1 | cut -d\":\" -f2' || true")
         if [ -z "$live_tok" ]; then
-            live_tok=$(eval "$ssh_cmd 'pg-node 2>/dev/null | grep -i \"API Key\" | grep -oE \"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\" | head -n 1' || true")
+            live_tok=$(eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node 2>/dev/null | grep -i \"API Key\" | grep -oE \"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\" | head -n 1' || true")
         fi
         if [ -n "$live_tok" ]; then
             target_token="$live_tok"
@@ -387,7 +387,7 @@ manage_saved_nodes() {
             ;;
         2)
             log INFO "Restarting node service..."
-            eval "$ssh_cmd 'pg-node restart -n 2>/dev/null || docker compose -f /opt/pg-node/docker-compose.yml restart 2>/dev/null || true'"
+            eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node restart -n 2>/dev/null || docker compose -f /opt/pg-node/docker-compose.yml restart 2>/dev/null || true'"
             log OK "Node service restarted."
             ;;
         3)
@@ -397,11 +397,11 @@ manage_saved_nodes() {
             read -rp "Select Protocol [1-2]: " PROTO_SEL
             if [ "$PROTO_SEL" == "1" ]; then
                 log INFO "Configuring node to use gRPC protocol..."
-                eval "$ssh_cmd 'pg-node install -y --override --use-grpc --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $target_sport --api-port $target_aport'"
+                eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node install -y --override --use-grpc --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $target_sport --api-port $target_aport'"
                 log OK "Switched to gRPC protocol."
             elif [ "$PROTO_SEL" == "2" ]; then
                 log INFO "Configuring node to use REST protocol..."
-                eval "$ssh_cmd 'pg-node install -y --override --use-rest --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $target_sport --api-port $target_aport'"
+                eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node install -y --override --use-rest --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $target_sport --api-port $target_aport'"
                 log OK "Switched to REST protocol."
             fi
             ;;
@@ -411,10 +411,10 @@ manage_saved_nodes() {
             echo "  2) Remove pg-node-service (Systemd)"
             read -rp "Action [1-2]: " SYS_SEL
             if [ "$SYS_SEL" == "1" ]; then
-                eval "$ssh_cmd 'pg-node service-install'"
+                eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node service-install'"
                 log OK "Systemd service installed and started."
             elif [ "$SYS_SEL" == "2" ]; then
-                eval "$ssh_cmd 'pg-node service-uninstall'"
+                eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node service-uninstall'"
                 log OK "Systemd service removed."
             fi
             ;;
@@ -423,29 +423,29 @@ manage_saved_nodes() {
             read -rp "Enter Xray version (Press Enter for 'latest'): " X_VER
             X_VER=${X_VER:-latest}
             log INFO "Updating Xray-core to version: $X_VER on $target_ip..."
-            eval "$ssh_cmd 'pg-node core-update --version $X_VER'"
+            eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node core-update --version $X_VER'"
             log OK "Xray-core update dispatched."
             ;;
         6)
             log INFO "Updating PasarGuard Node software to latest..."
-            eval "$ssh_cmd 'pg-node update -y'"
+            eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node update -y'"
             log OK "Node updated successfully."
             ;;
         7)
             log INFO "Updating GeoFiles (GeoIP and GeoSite)..."
-            eval "$ssh_cmd 'pg-node geofiles'"
+            eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node geofiles'"
             log OK "GeoFiles downloaded/updated."
             ;;
         8)
             log INFO "Streaming Node Logs (Press Ctrl+C to return)..."
-            eval "$ssh_cmd 'pg-node logs'"
+            eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node logs'"
             ;;
         9)
             local c_src="/etc/letsencrypt/live/$target_bdom/fullchain.pem"
             local k_src="/etc/letsencrypt/live/$target_bdom/privkey.pem"
             cat "$c_src" | eval "$ssh_cmd 'cat > /var/lib/pg-node/certs/ssl_cert.pem && cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pasarguard/ssl/cert.pem'"
             cat "$k_src" | eval "$ssh_cmd 'cat > /var/lib/pg-node/certs/ssl_key.pem && cat > /var/lib/pasarguard/ssl/key.pem && chmod 600 /var/lib/pg-node/certs/ssl_key.pem /var/lib/pasarguard/ssl/key.pem'"
-            eval "$ssh_cmd 'pg-node restart -n 2>/dev/null || true'"
+            eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node restart -n 2>/dev/null || true'"
             log OK "Wildcard SSL re-synced and service restarted."
             ;;
         10)
@@ -459,7 +459,7 @@ manage_saved_nodes() {
             read -rp "Are you absolutely sure? Type 'yes' to proceed: " CONFIRM_PURGE
             if [ "$CONFIRM_PURGE" == "yes" ]; then
                 log INFO "Executing native pg-node uninstall on $target_ip..."
-                eval "$ssh_cmd 'pg-node uninstall -y 2>/dev/null || true'"
+                eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node uninstall -y 2>/dev/null || true'"
                 eval "$ssh_cmd 'rm -rf /opt/pg-node /var/lib/pg-node /var/lib/pasarguard /usr/local/bin/pg-node /etc/sysctl.d/99-bbr.conf'"
                 eval "$ssh_cmd 'ufw delete allow $target_sport/tcp 2>/dev/null || true; ufw delete allow $target_aport/tcp 2>/dev/null || true'"
                 log OK "Remote server cleaned up."
