@@ -149,7 +149,7 @@ deploy_new_node() {
     selected_token=$(jq -r ".[$((DOM_IDX - 1))].token" "$DOMAINS_FILE")
     selected_zone=$(jq -r ".[$((DOM_IDX - 1))].zone_id" "$DOMAINS_FILE")
 
-    read -rp "Node Hostname: " NODE_NAME
+    read -rp "Node Hostname (e.g. node-DE1): " NODE_NAME
     read -rp "Node Server IP: " NODE_IP
     read -rp "SSH Port [22]: " NODE_SSH_PORT
     NODE_SSH_PORT=${NODE_SSH_PORT:-22}
@@ -157,13 +157,18 @@ deploy_new_node() {
     NODE_SSH_USER=${NODE_SSH_USER:-root}
     read -rsp "SSH Password: " NODE_SSH_PASS
     echo ""
+
+    echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
+    echo -e "${COLOR_YELLOW}Guide: Enter only the subdomain prefix for this node.${COLOR_RESET}"
+    echo -e "Example: If you enter '${COLOR_BOLD}de1${COLOR_RESET}', full domain will be '${COLOR_BOLD}de1.$selected_domain${COLOR_RESET}'"
+    echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
     read -rp "Subdomain prefix for node: " SUBDOMAIN_PREFIX
 
-    # Default ports aligned with official specs: Service=62051, API=62050
-    read -rp "Service Port [62051]: " SERVICE_PORT
-    SERVICE_PORT=${SERVICE_PORT:-62051}
-    read -rp "API Port [62050]: " API_PORT
+    echo -e "\n${COLOR_CYAN}Port Configuration (First Node/API Port, then Proxy Service Port):${COLOR_RESET}"
+    read -rp "Node Port (API Port for Panel) [62050]: " API_PORT
     API_PORT=${API_PORT:-62050}
+    read -rp "Service Port (Client Traffic Proxy Port) [62051]: " SERVICE_PORT
+    SERVICE_PORT=${SERVICE_PORT:-62051}
 
     read -rp "Install PasarGuard Node binary? [Y/n]: " INSTALL_PG
     INSTALL_PG=${INSTALL_PG:-Y}
@@ -202,8 +207,8 @@ deploy_new_node() {
     log INFO "Updating remote system packages (non-interactive)..."
     eval "$ssh_cmd 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get upgrade -qq -y'"
 
-    log INFO "Configuring firewall for PasarGuard ports ($SERVICE_PORT, $API_PORT)..."
-    eval "$ssh_cmd 'ufw allow $SERVICE_PORT/tcp >/dev/null 2>&1 || true; ufw allow $API_PORT/tcp >/dev/null 2>&1 || true'"
+    log INFO "Configuring firewall for PasarGuard ports ($API_PORT, $SERVICE_PORT)..."
+    eval "$ssh_cmd 'ufw allow $API_PORT/tcp >/dev/null 2>&1 || true; ufw allow $SERVICE_PORT/tcp >/dev/null 2>&1 || true'"
 
     log INFO "Pre-deploying Wildcard SSL to /var/lib/pg-node/certs/ and /var/lib/pasarguard/ssl/ ..."
     eval "$ssh_cmd 'mkdir -p /var/lib/pg-node/certs /var/lib/pasarguard/ssl /opt/pg-node'"
@@ -249,10 +254,11 @@ deploy_new_node() {
 
         eval "$ssh_cmd 'pg-node restart -n 2>/dev/null || docker restart node 2>/dev/null || true'"
 
+        # Comprehensive API Token extraction
         local token_candidate
-        token_candidate=$(eval "$ssh_cmd 'pg-node 2>/dev/null | grep -i \"API Key\" | cut -d\":\" -f2 | tr -d \" \\r\\n\"'" | grep -oE '[0-9a-fA-F-]{36}' | head -n 1 || true)
+        token_candidate=$(eval "$ssh_cmd 'grep -oE \"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\" /opt/pg-node/.env /opt/pg-node/docker-compose.yml 2>/dev/null | head -n 1 | cut -d\":\" -f2' || true")
         if [ -z "$token_candidate" ]; then
-            token_candidate=$(eval "$ssh_cmd 'grep -E \"^(API_KEY|NODE_API_KEY|API_TOKEN)=\" /opt/pg-node/.env 2>/dev/null | cut -d\"=\" -f2 | tr -d \" \\r\\n\"'" | grep -oE '[0-9a-fA-F-]{36}' | head -n 1 || true)
+            token_candidate=$(eval "$ssh_cmd 'pg-node 2>/dev/null | grep -i \"API Key\" | grep -oE \"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\" | head -n 1' || true")
         fi
         if [ -n "$token_candidate" ]; then
             node_token="$token_candidate"
@@ -286,15 +292,13 @@ deploy_new_node() {
     echo -e "\n${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
     echo -e "${COLOR_GREEN}${COLOR_BOLD}       NODE DEPLOYMENT SUMMARY FOR PASARGUARD PANEL        ${COLOR_RESET}"
     echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
-    echo -e "  ${COLOR_BOLD}Node Name:${COLOR_RESET}     $NODE_NAME"
-    echo -e "  ${COLOR_BOLD}Address:${COLOR_RESET}       $full_hostname"
-    echo -e "  ${COLOR_BOLD}Service Port:${COLOR_RESET}  $SERVICE_PORT"
-    echo -e "  ${COLOR_BOLD}API Port:${COLOR_RESET}      $API_PORT"
-    echo -e "  ${COLOR_BOLD}Cert Path:${COLOR_RESET}     /var/lib/pg-node/certs/ssl_cert.pem"
-    echo -e "  ${COLOR_BOLD}Key Path:${COLOR_RESET}      /var/lib/pg-node/certs/ssl_key.pem"
-    if [ "$node_token" != "Not detected" ]; then
-        echo -e "  ${COLOR_BOLD}API Token:${COLOR_RESET}     ${COLOR_YELLOW}$node_token${COLOR_RESET}"
-    fi
+    echo -e "  ${COLOR_BOLD}Node Name:${COLOR_RESET}       $NODE_NAME"
+    echo -e "  ${COLOR_BOLD}Address:${COLOR_RESET}         $full_hostname"
+    echo -e "  ${COLOR_BOLD}Node Port (API):${COLOR_RESET} $API_PORT  --> (Enter this in Panel 'Node Port')"
+    echo -e "  ${COLOR_BOLD}Service Port:${COLOR_RESET}    $SERVICE_PORT  --> (Traffic Proxy Port)"
+    echo -e "  ${COLOR_BOLD}Cert Path:${COLOR_RESET}       /var/lib/pg-node/certs/ssl_cert.pem"
+    echo -e "  ${COLOR_BOLD}Key Path:${COLOR_RESET}        /var/lib/pg-node/certs/ssl_key.pem"
+    echo -e "  ${COLOR_BOLD}API Token:${COLOR_RESET}       ${COLOR_YELLOW}${node_token}${COLOR_RESET}"
     echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
     echo -e "${COLOR_BOLD}Public Certificate Content:${COLOR_RESET}"
     echo -e "${COLOR_YELLOW}$cert_content${COLOR_RESET}"
@@ -332,11 +336,12 @@ manage_saved_nodes() {
 
     local ssh_cmd="sshpass -p '$target_pass' ssh -p $target_port -o StrictHostKeyChecking=no $target_user@$target_ip"
 
-    if [ -z "$target_token" ] || [[ "$target_token" == *"#"* ]] || [ "$target_token" == "Not detected" ] || [ ${#target_token} -gt 36 ]; then
+    # Always fetch live fresh token if missing or malformed
+    if [ -z "$target_token" ] || [[ "$target_token" == *"#"* ]] || [ "$target_token" == "Not detected" ] || [ ${#target_token} -ne 36 ]; then
         local live_tok
-        live_tok=$(eval "$ssh_cmd 'pg-node 2>/dev/null | grep -i \"API Key\" | cut -d\":\" -f2 | tr -d \" \\r\\n\"'" | grep -oE '[0-9a-fA-F-]{36}' | head -n 1 || true)
+        live_tok=$(eval "$ssh_cmd 'grep -oE \"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\" /opt/pg-node/.env /opt/pg-node/docker-compose.yml 2>/dev/null | head -n 1 | cut -d\":\" -f2' || true")
         if [ -z "$live_tok" ]; then
-            live_tok=$(eval "$ssh_cmd 'grep -E \"^(API_KEY|NODE_API_KEY|API_TOKEN)=\" /opt/pg-node/.env 2>/dev/null | cut -d\"=\" -f2 | tr -d \" \\r\\n\"'" | grep -oE '[0-9a-fA-F-]{36}' | head -n 1 || true)
+            live_tok=$(eval "$ssh_cmd 'pg-node 2>/dev/null | grep -i \"API Key\" | grep -oE \"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\" | head -n 1' || true")
         fi
         if [ -n "$live_tok" ]; then
             target_token="$live_tok"
@@ -368,10 +373,10 @@ manage_saved_nodes() {
             echo -e "\n${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
             echo -e "${COLOR_GREEN}${COLOR_BOLD}            PASARGUARD PANEL CONNECTION DETAILS            ${COLOR_RESET}"
             echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
-            echo -e "  ${COLOR_BOLD}Node Name:${COLOR_RESET}     $target_host"
-            echo -e "  ${COLOR_BOLD}Address:${COLOR_RESET}       $target_addr"
-            echo -e "  ${COLOR_BOLD}Node Port (API):${COLOR_RESET} $target_aport  (Set this in Panel 'Node Port')"
-            echo -e "  ${COLOR_BOLD}Service Port:${COLOR_RESET}    $target_sport  (Traffic Proxy Port)"
+            echo -e "  ${COLOR_BOLD}Node Name:${COLOR_RESET}       $target_host"
+            echo -e "  ${COLOR_BOLD}Address:${COLOR_RESET}         $target_addr"
+            echo -e "  ${COLOR_BOLD}Node Port (API):${COLOR_RESET} $target_aport  --> (Set this in Panel 'Node Port')"
+            echo -e "  ${COLOR_BOLD}Service Port:${COLOR_RESET}    $target_sport  --> (Traffic Proxy Port)"
             echo -e "  ${COLOR_BOLD}Cert Path:${COLOR_RESET}       /var/lib/pg-node/certs/ssl_cert.pem"
             echo -e "  ${COLOR_BOLD}Key Path:${COLOR_RESET}        /var/lib/pg-node/certs/ssl_key.pem"
             echo -e "  ${COLOR_BOLD}API Token:${COLOR_RESET}       ${COLOR_YELLOW}${target_token:-Not found}${COLOR_RESET}"
