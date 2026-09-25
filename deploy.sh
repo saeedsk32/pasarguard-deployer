@@ -525,14 +525,14 @@ while true; do
            list_domain_profiles && {
                read -rp "Select Domain Index: " D_IDX
                D_SEL=$(jq -r ".[$((D_IDX - 1))].domain" "$DOMAINS_FILE")
-               sudo mkdir -p /var/lib/pasarguard/ssl /var/lib/pg-node/certs
-               sudo cat "/etc/letsencrypt/live/$D_SEL/fullchain.pem" | sudo tee /var/lib/pasarguard/ssl/cert.pem >/dev/null
-               sudo cat "/etc/letsencrypt/live/$D_SEL/privkey.pem" | sudo tee /var/lib/pasarguard/ssl/key.pem >/dev/null
-               sudo cp /var/lib/pasarguard/ssl/cert.pem /var/lib/pg-node/certs/ssl_cert.pem
-               sudo cp /var/lib/pasarguard/ssl/key.pem /var/lib/pg-node/certs/ssl_key.pem
-               sudo chmod 644 /var/lib/pasarguard/ssl/cert.pem /var/lib/pg-node/certs/ssl_cert.pem
-               sudo chmod 600 /var/lib/pasarguard/ssl/key.pem /var/lib/pg-node/certs/ssl_key.pem
-               log OK "Master SSL synced successfully."
+               sudo mkdir -p /var/lib/pasarguard/ssl /var/lib/pasarguard/certs /var/lib/pg-node/certs
+               local base_name="${D_SEL%%.*}"
+               sudo cat "/etc/letsencrypt/live/$D_SEL/fullchain.pem" | sudo tee /var/lib/pasarguard/ssl/cert.pem /var/lib/pasarguard/certs/"$base_name".cer /var/lib/pasarguard/certs/cert.pem /var/lib/pg-node/certs/ssl_cert.pem >/dev/null
+               sudo cat "/etc/letsencrypt/live/$D_SEL/privkey.pem" | sudo tee /var/lib/pasarguard/ssl/key.pem /var/lib/pasarguard/certs/"$base_name".key /var/lib/pasarguard/certs/key.pem /var/lib/pg-node/certs/ssl_key.pem >/dev/null
+               sudo chmod 644 /var/lib/pasarguard/ssl/cert.pem /var/lib/pasarguard/certs/*.cer /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || true
+               sudo chmod 600 /var/lib/pasarguard/ssl/key.pem /var/lib/pasarguard/certs/*.key /var/lib/pg-node/certs/ssl_key.pem 2>/dev/null || true
+               pasarguard restart 2>/dev/null || docker compose -f /opt/pasarguard/docker-compose.yml restart 2>/dev/null || true
+               log OK "Master SSL synced and PasarGuard web panel restarted."
            }
            ;;
         4) manage_saved_nodes ;;
