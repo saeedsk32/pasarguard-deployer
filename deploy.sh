@@ -109,14 +109,13 @@ issue_wildcard_ssl() {
         
         log OK "Wildcard SSL certificate successfully generated."
 
-        sudo mkdir -p "/var/lib/pasarguard/ssl" "/var/lib/pg-node/certs"
-        sudo cat "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" | sudo tee "/var/lib/pasarguard/ssl/cert.pem" >/dev/null
-        sudo cat "/etc/letsencrypt/live/$DOMAIN/privkey.pem" | sudo tee "/var/lib/pasarguard/ssl/key.pem" >/dev/null
-        sudo cp "/var/lib/pasarguard/ssl/cert.pem" "/var/lib/pg-node/certs/ssl_cert.pem"
-        sudo cp "/var/lib/pasarguard/ssl/key.pem" "/var/lib/pg-node/certs/ssl_key.pem"
-        sudo chmod 644 "/var/lib/pasarguard/ssl/cert.pem" "/var/lib/pg-node/certs/ssl_cert.pem"
-        sudo chmod 600 "/var/lib/pasarguard/ssl/key.pem" "/var/lib/pg-node/certs/ssl_key.pem"
-        log OK "Master SSL synced to: /var/lib/pasarguard/ssl/ and /var/lib/pg-node/certs/"
+        sudo mkdir -p "/var/lib/pasarguard/ssl" "/var/lib/pasarguard/certs" "/var/lib/pg-node/certs"
+        local base_prefix="${DOMAIN%%.*}"
+        sudo cat "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" | sudo tee "/var/lib/pasarguard/ssl/cert.pem" "/var/lib/pasarguard/certs/$base_prefix.cer" "/var/lib/pasarguard/certs/cert.pem" "/var/lib/pg-node/certs/ssl_cert.pem" >/dev/null
+        sudo cat "/etc/letsencrypt/live/$DOMAIN/privkey.pem" | sudo tee "/var/lib/pasarguard/ssl/key.pem" "/var/lib/pasarguard/certs/$base_prefix.key" "/var/lib/pasarguard/certs/key.pem" "/var/lib/pg-node/certs/ssl_key.pem" >/dev/null
+        sudo chmod 644 "/var/lib/pasarguard/ssl/cert.pem" "/var/lib/pasarguard/certs/"* /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || true
+        sudo chmod 600 "/var/lib/pasarguard/ssl/key.pem" "/var/lib/pasarguard/certs/"*.key /var/lib/pg-node/certs/ssl_key.pem 2>/dev/null || true
+        log OK "Master SSL synced to: /var/lib/pasarguard/certs/ and /var/lib/pg-node/certs/"
 
         local tmp_file
         tmp_file=$(mktemp)
@@ -159,12 +158,24 @@ deploy_new_node() {
     read -rsp "SSH Password: " NODE_SSH_PASS
     echo ""
     read -rp "Subdomain prefix for node: " SUBDOMAIN_PREFIX
-    read -rp "Service Port [62050]: " SERVICE_PORT
-    SERVICE_PORT=${SERVICE_PORT:-62050}
-    read -rp "API Port [62051]: " API_PORT
-    API_PORT=${API_PORT:-62051}
+
+    # Default ports aligned with official specs: Service=62051, API=62050
+    read -rp "Service Port [62051]: " SERVICE_PORT
+    SERVICE_PORT=${SERVICE_PORT:-62051}
+    read -rp "API Port [62050]: " API_PORT
+    API_PORT=${API_PORT:-62050}
+
     read -rp "Install PasarGuard Node binary? [Y/n]: " INSTALL_PG
     INSTALL_PG=${INSTALL_PG:-Y}
+
+    local SYSTEMD_FLAG="--install-service"
+    if [[ "$INSTALL_PG" =~ ^[Yy]$ ]]; then
+        read -rp "Install and start systemd background service? [Y/n]: " ASK_SYSTEMD
+        ASK_SYSTEMD=${ASK_SYSTEMD:-Y}
+        if ! [[ "$ASK_SYSTEMD" =~ ^[Yy]$ ]]; then
+            SYSTEMD_FLAG="--no-install-service"
+        fi
+    fi
 
     local full_hostname="$SUBDOMAIN_PREFIX.$selected_domain"
     local cert_src="/etc/letsencrypt/live/$selected_domain/fullchain.pem"
@@ -226,12 +237,11 @@ deploy_new_node() {
 
     local node_token="Not detected"
     if [[ "$INSTALL_PG" =~ ^[Yy]$ ]]; then
-        log INFO "Installing/Enforcing node using official pg-node CLI with explicit SSL flags..."
-        # First ensure script is installed
+        log INFO "Installing/Enforcing node using official pg-node CLI ($SYSTEMD_FLAG)..."
         eval "$ssh_cmd 'if ! command -v pg-node >/dev/null 2>&1; then sudo bash -c \"\$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)\" @ install-script; fi'" || true
 
-        # Run non-interactive native install
-        eval "$ssh_cmd 'pg-node install -y --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $SERVICE_PORT --api-port $API_PORT || true'"
+        # Run non-interactive native install with exact flags
+        eval "$ssh_cmd 'pg-node install -y --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $SERVICE_PORT --api-port $API_PORT $SYSTEMD_FLAG || true'"
 
         # Double enforce our real SSL certs
         cat "$cert_src" | eval "$ssh_cmd 'cat > /var/lib/pg-node/certs/ssl_cert.pem && cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pasarguard/ssl/cert.pem'"
@@ -315,14 +325,13 @@ manage_saved_nodes() {
     target_pass=$(jq -r ".[$((N_IDX - 1))].ssh_pass" "$NODES_FILE")
     target_host=$(jq -r ".[$((N_IDX - 1))].hostname" "$NODES_FILE")
     target_addr=$(jq -r ".[$((N_IDX - 1))].address" "$NODES_FILE")
-    target_sport=$(jq -r ".[$((N_IDX - 1))].service_port // 62050" "$NODES_FILE")
-    target_aport=$(jq -r ".[$((N_IDX - 1))].api_port // 62051" "$NODES_FILE")
+    target_sport=$(jq -r ".[$((N_IDX - 1))].service_port // 62051" "$NODES_FILE")
+    target_aport=$(jq -r ".[$((N_IDX - 1))].api_port // 62050" "$NODES_FILE")
     target_token=$(jq -r ".[$((N_IDX - 1))].api_token // empty" "$NODES_FILE")
     target_bdom=$(jq -r ".[$((N_IDX - 1))].base_domain" "$NODES_FILE")
 
     local ssh_cmd="sshpass -p '$target_pass' ssh -p $target_port -o StrictHostKeyChecking=no $target_user@$target_ip"
 
-    # Always fetch live fresh token if missing, malformed, or full key string
     if [ -z "$target_token" ] || [[ "$target_token" == *"#"* ]] || [ "$target_token" == "Not detected" ] || [ ${#target_token} -gt 36 ]; then
         local live_tok
         live_tok=$(eval "$ssh_cmd 'pg-node 2>/dev/null | grep -i \"API Key\" | cut -d\":\" -f2 | tr -d \" \\r\\n\"'" | grep -oE '[0-9a-fA-F-]{36}' | head -n 1 || true)
@@ -340,15 +349,17 @@ manage_saved_nodes() {
     echo -e "\nActions for node: $target_host - $target_ip"
     echo "  1) View Panel Connection Info (Address, Ports, Token and Full Card)"
     echo "  2) Restart PasarGuard Node (pg-node restart)"
-    echo "  3) Update / Change Xray-core (pg-node core-update)"
-    echo "  4) Update PasarGuard Node Software (pg-node update)"
-    echo "  5) Download / Update GeoFiles (pg-node geofiles)"
-    echo "  6) View Live Node Logs (pg-node logs)"
-    echo "  7) Re-sync Wildcard SSL"
-    echo "  8) Delete Node from Local Inventory Only"
-    echo "  9) Completely Uninstall Node from Server, Cloudflare & Inventory"
-    echo "  10) Cancel"
-    read -rp "Action [1-10]: " N_ACT
+    echo "  3) Switch Node Protocol (gRPC <-> REST)"
+    echo "  4) Manage Systemd Service (Install / Remove pg-node-service)"
+    echo "  5) Update / Change Xray-core (pg-node core-update)"
+    echo "  6) Update PasarGuard Node Software (pg-node update)"
+    echo "  7) Download / Update GeoFiles (pg-node geofiles)"
+    echo "  8) View Live Node Logs (pg-node logs)"
+    echo "  9) Re-sync Wildcard SSL"
+    echo "  10) Delete Node from Local Inventory Only"
+    echo "  11) Completely Uninstall Node from Server, Cloudflare & Inventory"
+    echo "  12) Cancel"
+    read -rp "Action [1-12]: " N_ACT
 
     case "$N_ACT" in
         1)
@@ -359,11 +370,11 @@ manage_saved_nodes() {
             echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
             echo -e "  ${COLOR_BOLD}Node Name:${COLOR_RESET}     $target_host"
             echo -e "  ${COLOR_BOLD}Address:${COLOR_RESET}       $target_addr"
-            echo -e "  ${COLOR_BOLD}Service Port:${COLOR_RESET}  $target_sport"
-            echo -e "  ${COLOR_BOLD}API Port:${COLOR_RESET}      $target_aport"
-            echo -e "  ${COLOR_BOLD}Cert Path:${COLOR_RESET}     /var/lib/pg-node/certs/ssl_cert.pem"
-            echo -e "  ${COLOR_BOLD}Key Path:${COLOR_RESET}      /var/lib/pg-node/certs/ssl_key.pem"
-            echo -e "  ${COLOR_BOLD}API Token:${COLOR_RESET}     ${COLOR_YELLOW}${target_token:-Not found}${COLOR_RESET}"
+            echo -e "  ${COLOR_BOLD}Node Port (API):${COLOR_RESET} $target_aport  (Set this in Panel 'Node Port')"
+            echo -e "  ${COLOR_BOLD}Service Port:${COLOR_RESET}    $target_sport  (Traffic Proxy Port)"
+            echo -e "  ${COLOR_BOLD}Cert Path:${COLOR_RESET}       /var/lib/pg-node/certs/ssl_cert.pem"
+            echo -e "  ${COLOR_BOLD}Key Path:${COLOR_RESET}        /var/lib/pg-node/certs/ssl_key.pem"
+            echo -e "  ${COLOR_BOLD}API Token:${COLOR_RESET}       ${COLOR_YELLOW}${target_token:-Not found}${COLOR_RESET}"
             echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
             echo -e "${COLOR_BOLD}Public Certificate Content:${COLOR_RESET}"
             echo -e "${COLOR_YELLOW}$cert_data${COLOR_RESET}"
@@ -375,6 +386,34 @@ manage_saved_nodes() {
             log OK "Node service restarted."
             ;;
         3)
+            echo -e "\n${COLOR_CYAN}--- Switch Node Protocol ---${COLOR_RESET}"
+            echo "  1) Use gRPC (Official Default)"
+            echo "  2) Use REST"
+            read -rp "Select Protocol [1-2]: " PROTO_SEL
+            if [ "$PROTO_SEL" == "1" ]; then
+                log INFO "Configuring node to use gRPC protocol..."
+                eval "$ssh_cmd 'pg-node install -y --override --use-grpc --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $target_sport --api-port $target_aport'"
+                log OK "Switched to gRPC protocol."
+            elif [ "$PROTO_SEL" == "2" ]; then
+                log INFO "Configuring node to use REST protocol..."
+                eval "$ssh_cmd 'pg-node install -y --override --use-rest --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $target_sport --api-port $target_aport'"
+                log OK "Switched to REST protocol."
+            fi
+            ;;
+        4)
+            echo -e "\n${COLOR_CYAN}--- Manage Systemd Service ---${COLOR_RESET}"
+            echo "  1) Install and Start pg-node-service (Systemd)"
+            echo "  2) Remove pg-node-service (Systemd)"
+            read -rp "Action [1-2]: " SYS_SEL
+            if [ "$SYS_SEL" == "1" ]; then
+                eval "$ssh_cmd 'pg-node service-install'"
+                log OK "Systemd service installed and started."
+            elif [ "$SYS_SEL" == "2" ]; then
+                eval "$ssh_cmd 'pg-node service-uninstall'"
+                log OK "Systemd service removed."
+            fi
+            ;;
+        5)
             echo -e "\n${COLOR_CYAN}--- Update / Change Xray-core ---${COLOR_RESET}"
             read -rp "Enter Xray version (Press Enter for 'latest'): " X_VER
             X_VER=${X_VER:-latest}
@@ -382,21 +421,21 @@ manage_saved_nodes() {
             eval "$ssh_cmd 'pg-node core-update --version $X_VER'"
             log OK "Xray-core update dispatched."
             ;;
-        4)
+        6)
             log INFO "Updating PasarGuard Node software to latest..."
             eval "$ssh_cmd 'pg-node update -y'"
             log OK "Node updated successfully."
             ;;
-        5)
+        7)
             log INFO "Updating GeoFiles (GeoIP and GeoSite)..."
             eval "$ssh_cmd 'pg-node geofiles'"
             log OK "GeoFiles downloaded/updated."
             ;;
-        6)
+        8)
             log INFO "Streaming Node Logs (Press Ctrl+C to return)..."
             eval "$ssh_cmd 'pg-node logs'"
             ;;
-        7)
+        9)
             local c_src="/etc/letsencrypt/live/$target_bdom/fullchain.pem"
             local k_src="/etc/letsencrypt/live/$target_bdom/privkey.pem"
             cat "$c_src" | eval "$ssh_cmd 'cat > /var/lib/pg-node/certs/ssl_cert.pem && cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pasarguard/ssl/cert.pem'"
@@ -404,13 +443,13 @@ manage_saved_nodes() {
             eval "$ssh_cmd 'pg-node restart -n 2>/dev/null || true'"
             log OK "Wildcard SSL re-synced and service restarted."
             ;;
-        8)
+        10)
             local tmp_d
             tmp_d=$(mktemp)
             jq "del(.[$((N_IDX - 1))])" "$NODES_FILE" > "$tmp_d" && mv "$tmp_d" "$NODES_FILE"
             log OK "Node removed from local inventory only."
             ;;
-        9)
+        11)
             echo -e "${COLOR_RED}${COLOR_BOLD}WARNING: This will completely destroy all PasarGuard node data, remove docker containers, delete certificates on $target_ip, clean up Cloudflare DNS, and delete the node profile!${COLOR_RESET}"
             read -rp "Are you absolutely sure? Type 'yes' to proceed: " CONFIRM_PURGE
             if [ "$CONFIRM_PURGE" == "yes" ]; then
@@ -469,11 +508,13 @@ renew_sync_all_ssl() {
 
         if [ -f "$cert" ] && [ -f "$key" ]; then
             log INFO "Syncing renewed SSL to Master..."
-            sudo mkdir -p /var/lib/pasarguard/ssl /var/lib/pg-node/certs
-            sudo cat "$cert" | sudo tee /var/lib/pasarguard/ssl/cert.pem >/dev/null
-            sudo cat "$key" | sudo tee /var/lib/pasarguard/ssl/key.pem >/dev/null
-            sudo cp /var/lib/pasarguard/ssl/cert.pem /var/lib/pg-node/certs/ssl_cert.pem
-            sudo cp /var/lib/pasarguard/ssl/key.pem /var/lib/pg-node/certs/ssl_key.pem
+            sudo mkdir -p /var/lib/pasarguard/ssl /var/lib/pasarguard/certs /var/lib/pg-node/certs
+            local base_prefix="${dom%%.*}"
+            sudo cat "$cert" | sudo tee /var/lib/pasarguard/ssl/cert.pem "/var/lib/pasarguard/certs/$base_prefix.cer" /var/lib/pasarguard/certs/cert.pem /var/lib/pg-node/certs/ssl_cert.pem >/dev/null
+            sudo cat "$key" | sudo tee /var/lib/pasarguard/ssl/key.pem "/var/lib/pasarguard/certs/$base_prefix.key" /var/lib/pasarguard/certs/key.pem /var/lib/pg-node/certs/ssl_key.pem >/dev/null
+            sudo chmod 644 /var/lib/pasarguard/ssl/cert.pem /var/lib/pasarguard/certs/* /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || true
+            sudo chmod 600 /var/lib/pasarguard/ssl/key.pem /var/lib/pasarguard/certs/*.key /var/lib/pg-node/certs/ssl_key.pem 2>/dev/null || true
+            pasarguard restart 2>/dev/null || true
 
             local node_count
             node_count=$(jq '. | length' "$NODES_FILE")
@@ -509,7 +550,7 @@ while true; do
     echo -e "  [1] Deploy New Node (Auto SSL Injection & Zero Self-Signed)"
     echo -e "  [2] Issue Wildcard SSL Certificate (Let's Encrypt + Cloudflare)"
     echo -e "  [3] Sync SSL to Local Master Server"
-    echo -e "  [4] Manage Saved Nodes (Inspect, Xray-Core, Logs, Purge)"
+    echo -e "  [4] Manage Saved Nodes (Inspect, Protocol, Systemd, Xray, Purge)"
     echo -e "  [5] Domain Profiles Manager"
     echo -e "  [6] Renew & Synchronize All SSLs"
     echo -e "  [7] View Execution Logs"
