@@ -164,7 +164,7 @@ deploy_new_node() {
     echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
     read -rp "Subdomain prefix for node: " SUBDOMAIN_PREFIX
 
-    echo -e "\n${COLOR_CYAN}Port Configuration (First Node/API Port, then Proxy Service Port):${COLOR_RESET}"
+    echo -e "\n${COLOR_CYAN}Port Configuration:${COLOR_RESET}"
     read -rp "Node Port (API Port for Panel) [62050]: " API_PORT
     API_PORT=${API_PORT:-62050}
     read -rp "Service Port (Client Traffic Proxy Port) [62051]: " SERVICE_PORT
@@ -192,29 +192,29 @@ deploy_new_node() {
     fi
 
     log INFO "Validating SSH connection to $NODE_IP:$NODE_SSH_PORT..."
-    local ssh_cmd="sshpass -p '$NODE_SSH_PASS' ssh -p $NODE_SSH_PORT -o StrictHostKeyChecking=no -o ConnectTimeout=10 $NODE_SSH_USER@$NODE_IP"
-
-    if ! eval "$ssh_cmd 'echo connected'" >/dev/null 2>&1; then
+    if ! sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$NODE_SSH_USER@$NODE_IP" "echo connected" >/dev/null 2>&1; then
         log ERROR "Cannot connect via SSH. Verify IP, port, and password."
         return 1
     fi
     log OK "SSH connection established."
 
     log INFO "Applying system configurations on remote node..."
-    eval "$ssh_cmd 'hostnamectl set-hostname \"$NODE_NAME\" || true'"
-    eval "$ssh_cmd 'modprobe tcp_bbr 2>/dev/null || true; echo \"net.core.default_qdisc=fq\" > /etc/sysctl.d/99-bbr.conf; echo \"net.ipv4.tcp_congestion_control=bbr\" >> /etc/sysctl.d/99-bbr.conf; sysctl --system >/dev/null 2>&1 || true'"
-
-    log INFO "Updating remote system packages (non-interactive)..."
-    eval "$ssh_cmd 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get upgrade -qq -y'"
-
-    log INFO "Configuring firewall for PasarGuard ports ($API_PORT, $SERVICE_PORT)..."
-    eval "$ssh_cmd 'ufw allow $API_PORT/tcp >/dev/null 2>&1 || true; ufw allow $SERVICE_PORT/tcp >/dev/null 2>&1 || true'"
+    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" bash << REMOTE_INIT
+hostnamectl set-hostname "$NODE_NAME" || true
+modprobe tcp_bbr 2>/dev/null || true
+echo "net.core.default_qdisc=fq" > /etc/sysctl.d/99-bbr.conf
+echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.d/99-bbr.conf
+sysctl --system >/dev/null 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get upgrade -qq -y
+ufw allow $API_PORT/tcp >/dev/null 2>&1 || true
+ufw allow $SERVICE_PORT/tcp >/dev/null 2>&1 || true
+mkdir -p /var/lib/pg-node/certs /var/lib/pasarguard/ssl /opt/pg-node
+REMOTE_INIT
 
     log INFO "Pre-deploying Wildcard SSL to /var/lib/pg-node/certs/ and /var/lib/pasarguard/ssl/ ..."
-    eval "$ssh_cmd 'mkdir -p /var/lib/pg-node/certs /var/lib/pasarguard/ssl /opt/pg-node'"
-    
-    cat "$cert_src" | eval "$ssh_cmd 'cat > /var/lib/pasarguard/ssl/cert.pem && cp /var/lib/pasarguard/ssl/cert.pem /var/lib/pg-node/certs/ssl_cert.pem && chmod 644 /var/lib/pasarguard/ssl/cert.pem /var/lib/pg-node/certs/ssl_cert.pem'"
-    cat "$key_src" | eval "$ssh_cmd 'cat > /var/lib/pasarguard/ssl/key.pem && cp /var/lib/pasarguard/ssl/key.pem /var/lib/pg-node/certs/ssl_key.pem && chmod 600 /var/lib/pasarguard/ssl/key.pem /var/lib/pg-node/certs/ssl_key.pem'"
+    cat "$cert_src" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat > /var/lib/pasarguard/ssl/cert.pem && cp /var/lib/pasarguard/ssl/cert.pem /var/lib/pg-node/certs/ssl_cert.pem && chmod 644 /var/lib/pasarguard/ssl/cert.pem /var/lib/pg-node/certs/ssl_cert.pem"
+    cat "$key_src" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat > /var/lib/pasarguard/ssl/key.pem && cp /var/lib/pasarguard/ssl/key.pem /var/lib/pg-node/certs/ssl_key.pem && chmod 600 /var/lib/pasarguard/ssl/key.pem /var/lib/pg-node/certs/ssl_key.pem"
     log OK "Wildcard SSL pre-seeded successfully."
 
     log INFO "Configuring Cloudflare DNS A-record: $full_hostname -> $NODE_IP..."
@@ -242,24 +242,23 @@ deploy_new_node() {
 
     local node_token="Not detected"
     if [[ "$INSTALL_PG" =~ ^[Yy]$ ]]; then
-        log INFO "Installing/Enforcing node using official pg-node CLI ($SYSTEMD_FLAG)..."
-        eval "$ssh_cmd 'if ! command -v pg-node >/dev/null 2>&1; then sudo bash -c \"\$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)\" @ install-script; fi'" || true
+        log INFO "Installing PasarGuard Node cleanly via official repository..."
+        sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" bash << REMOTE_INSTALL
+set -e
+curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh -o /tmp/pg-node.sh
+chmod +x /tmp/pg-node.sh
+/tmp/pg-node.sh @ install-script
+pg-node install -y --override --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $SERVICE_PORT --api-port $API_PORT $SYSTEMD_FLAG || true
+pg-node restart -n 2>/dev/null || true
+REMOTE_INSTALL
 
-        # Run non-interactive native install with exact flags
-        eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node install -y --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $SERVICE_PORT --api-port $API_PORT $SYSTEMD_FLAG || true'"
+        # Re-enforce SSL after installer finishes
+        cat "$cert_src" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat > /var/lib/pg-node/certs/ssl_cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem"
+        cat "$key_src" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat > /var/lib/pg-node/certs/ssl_key.pem && chmod 600 /var/lib/pg-node/certs/ssl_key.pem"
 
-        # Double enforce our real SSL certs
-        cat "$cert_src" | eval "$ssh_cmd 'cat > /var/lib/pg-node/certs/ssl_cert.pem && cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pasarguard/ssl/cert.pem'"
-        cat "$key_src" | eval "$ssh_cmd 'cat > /var/lib/pg-node/certs/ssl_key.pem && cat > /var/lib/pasarguard/ssl/key.pem && chmod 600 /var/lib/pg-node/certs/ssl_key.pem /var/lib/pasarguard/ssl/key.pem'"
-
-        eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node restart -n 2>/dev/null || docker restart node 2>/dev/null || true'"
-
-        # Comprehensive API Token extraction
+        # Fetch valid UUID token
         local token_candidate
-        token_candidate=$(eval "$ssh_cmd 'grep -oE \"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\" /opt/pg-node/.env /opt/pg-node/docker-compose.yml 2>/dev/null | head -n 1 | cut -d\":\" -f2' || true")
-        if [ -z "$token_candidate" ]; then
-            token_candidate=$(eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node 2>/dev/null | grep -i \"API Key\" | grep -oE \"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\" | head -n 1' || true")
-        fi
+        token_candidate=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' /opt/pg-node/.env 2>/dev/null | head -n 1" || true)
         if [ -n "$token_candidate" ]; then
             node_token="$token_candidate"
         fi
@@ -334,15 +333,9 @@ manage_saved_nodes() {
     target_token=$(jq -r ".[$((N_IDX - 1))].api_token // empty" "$NODES_FILE")
     target_bdom=$(jq -r ".[$((N_IDX - 1))].base_domain" "$NODES_FILE")
 
-    local ssh_cmd="sshpass -p '$target_pass' ssh -p $target_port -o StrictHostKeyChecking=no $target_user@$target_ip"
-
-    # Always fetch live fresh token if missing or malformed
     if [ -z "$target_token" ] || [[ "$target_token" == *"#"* ]] || [ "$target_token" == "Not detected" ] || [ ${#target_token} -ne 36 ]; then
         local live_tok
-        live_tok=$(eval "$ssh_cmd 'grep -oE \"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\" /opt/pg-node/.env /opt/pg-node/docker-compose.yml 2>/dev/null | head -n 1 | cut -d\":\" -f2' || true")
-        if [ -z "$live_tok" ]; then
-            live_tok=$(eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node 2>/dev/null | grep -i \"API Key\" | grep -oE \"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\" | head -n 1' || true")
-        fi
+        live_tok=$(sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no "$target_user@$target_ip" "grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' /opt/pg-node/.env 2>/dev/null | head -n 1" || true)
         if [ -n "$live_tok" ]; then
             target_token="$live_tok"
             local tmp_sync
@@ -369,7 +362,7 @@ manage_saved_nodes() {
     case "$N_ACT" in
         1)
             local cert_data
-            cert_data=$(eval "$ssh_cmd 'cat /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || cat /var/lib/pasarguard/ssl/cert.pem 2>/dev/null'" || true)
+            cert_data=$(sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no "$target_user@$target_ip" "cat /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || cat /var/lib/pasarguard/ssl/cert.pem 2>/dev/null" || true)
             echo -e "\n${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
             echo -e "${COLOR_GREEN}${COLOR_BOLD}            PASARGUARD PANEL CONNECTION DETAILS            ${COLOR_RESET}"
             echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
@@ -387,7 +380,7 @@ manage_saved_nodes() {
             ;;
         2)
             log INFO "Restarting node service..."
-            eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node restart -n 2>/dev/null || docker compose -f /opt/pg-node/docker-compose.yml restart 2>/dev/null || true'"
+            sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no "$target_user@$target_ip" "pg-node restart -n 2>/dev/null || true"
             log OK "Node service restarted."
             ;;
         3)
@@ -397,11 +390,11 @@ manage_saved_nodes() {
             read -rp "Select Protocol [1-2]: " PROTO_SEL
             if [ "$PROTO_SEL" == "1" ]; then
                 log INFO "Configuring node to use gRPC protocol..."
-                eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node install -y --override --use-grpc --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $target_sport --api-port $target_aport'"
+                sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no "$target_user@$target_ip" "pg-node install -y --override --use-grpc --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $target_sport --api-port $target_aport"
                 log OK "Switched to gRPC protocol."
             elif [ "$PROTO_SEL" == "2" ]; then
                 log INFO "Configuring node to use REST protocol..."
-                eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node install -y --override --use-rest --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $target_sport --api-port $target_aport'"
+                sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no "$target_user@$target_ip" "pg-node install -y --override --use-rest --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $target_sport --api-port $target_aport"
                 log OK "Switched to REST protocol."
             fi
             ;;
@@ -411,10 +404,10 @@ manage_saved_nodes() {
             echo "  2) Remove pg-node-service (Systemd)"
             read -rp "Action [1-2]: " SYS_SEL
             if [ "$SYS_SEL" == "1" ]; then
-                eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node service-install'"
+                sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no "$target_user@$target_ip" "pg-node service-install"
                 log OK "Systemd service installed and started."
             elif [ "$SYS_SEL" == "2" ]; then
-                eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node service-uninstall'"
+                sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no "$target_user@$target_ip" "pg-node service-uninstall"
                 log OK "Systemd service removed."
             fi
             ;;
@@ -423,29 +416,29 @@ manage_saved_nodes() {
             read -rp "Enter Xray version (Press Enter for 'latest'): " X_VER
             X_VER=${X_VER:-latest}
             log INFO "Updating Xray-core to version: $X_VER on $target_ip..."
-            eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node core-update --version $X_VER'"
+            sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no "$target_user@$target_ip" "pg-node core-update --version $X_VER"
             log OK "Xray-core update dispatched."
             ;;
         6)
             log INFO "Updating PasarGuard Node software to latest..."
-            eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node update -y'"
+            sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no "$target_user@$target_ip" "pg-node update -y"
             log OK "Node updated successfully."
             ;;
         7)
             log INFO "Updating GeoFiles (GeoIP and GeoSite)..."
-            eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node geofiles'"
+            sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no "$target_user@$target_ip" "pg-node geofiles"
             log OK "GeoFiles downloaded/updated."
             ;;
         8)
             log INFO "Streaming Node Logs (Press Ctrl+C to return)..."
-            eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node logs'"
+            sshpass -p "$target_pass" ssh -p "$target_port" -t -o StrictHostKeyChecking=no "$target_user@$target_ip" "pg-node logs"
             ;;
         9)
             local c_src="/etc/letsencrypt/live/$target_bdom/fullchain.pem"
             local k_src="/etc/letsencrypt/live/$target_bdom/privkey.pem"
-            cat "$c_src" | eval "$ssh_cmd 'cat > /var/lib/pg-node/certs/ssl_cert.pem && cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pasarguard/ssl/cert.pem'"
-            cat "$k_src" | eval "$ssh_cmd 'cat > /var/lib/pg-node/certs/ssl_key.pem && cat > /var/lib/pasarguard/ssl/key.pem && chmod 600 /var/lib/pg-node/certs/ssl_key.pem /var/lib/pasarguard/ssl/key.pem'"
-            eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node restart -n 2>/dev/null || true'"
+            cat "$c_src" | sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no "$target_user@$target_ip" "cat > /var/lib/pg-node/certs/ssl_cert.pem && cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pasarguard/ssl/cert.pem"
+            cat "$k_src" | sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no "$target_user@$target_ip" "cat > /var/lib/pg-node/certs/ssl_key.pem && cat > /var/lib/pasarguard/ssl/key.pem && chmod 600 /var/lib/pg-node/certs/ssl_key.pem /var/lib/pasarguard/ssl/key.pem"
+            sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no "$target_user@$target_ip" "pg-node restart -n 2>/dev/null || true"
             log OK "Wildcard SSL re-synced and service restarted."
             ;;
         10)
@@ -459,9 +452,12 @@ manage_saved_nodes() {
             read -rp "Are you absolutely sure? Type 'yes' to proceed: " CONFIRM_PURGE
             if [ "$CONFIRM_PURGE" == "yes" ]; then
                 log INFO "Executing native pg-node uninstall on $target_ip..."
-                eval "$ssh_cmd 'export PATH=$PATH:/usr/local/bin; if ! command -v pg-node >/dev/null 2>&1; then bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install-script; fi; pg-node uninstall -y 2>/dev/null || true'"
-                eval "$ssh_cmd 'rm -rf /opt/pg-node /var/lib/pg-node /var/lib/pasarguard /usr/local/bin/pg-node /etc/sysctl.d/99-bbr.conf'"
-                eval "$ssh_cmd 'ufw delete allow $target_sport/tcp 2>/dev/null || true; ufw delete allow $target_aport/tcp 2>/dev/null || true'"
+                sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no "$target_user@$target_ip" bash << REMOTE_UNINSTALL
+pg-node uninstall -y 2>/dev/null || true
+rm -rf /opt/pg-node /var/lib/pg-node /var/lib/pasarguard /usr/local/bin/pg-node /etc/sysctl.d/99-bbr.conf
+ufw delete allow $target_sport/tcp 2>/dev/null || true
+ufw delete allow $target_aport/tcp 2>/dev/null || true
+REMOTE_UNINSTALL
                 log OK "Remote server cleaned up."
 
                 local cf_tok cf_zid
@@ -533,10 +529,9 @@ renew_sync_all_ssl() {
                     npass=$(jq -r ".[$n].ssh_pass" "$NODES_FILE")
 
                     log INFO "Pushing updated certs to node ($nip)..."
-                    local sc="sshpass -p '$npass' ssh -p $nport -o StrictHostKeyChecking=no $nuser@$nip"
-                    cat "$cert" | eval "$sc 'cat > /var/lib/pg-node/certs/ssl_cert.pem && cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pasarguard/ssl/cert.pem'"
-                    cat "$key" | eval "$sc 'cat > /var/lib/pg-node/certs/ssl_key.pem && cat > /var/lib/pasarguard/ssl/key.pem && chmod 600 /var/lib/pg-node/certs/ssl_key.pem /var/lib/pasarguard/ssl/key.pem'"
-                    eval "$sc 'pg-node restart -n 2>/dev/null || docker restart node 2>/dev/null || true'"
+                    cat "$cert" | sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no "$nuser@$nip" "cat > /var/lib/pg-node/certs/ssl_cert.pem && cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pasarguard/ssl/cert.pem"
+                    cat "$key" | sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no "$nuser@$nip" "cat > /var/lib/pg-node/certs/ssl_key.pem && cat > /var/lib/pasarguard/ssl/key.pem && chmod 600 /var/lib/pg-node/certs/ssl_key.pem /var/lib/pasarguard/ssl/key.pem"
+                    sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no "$nuser@$nip" "pg-node restart -n 2>/dev/null || true"
                 fi
             done
         fi
