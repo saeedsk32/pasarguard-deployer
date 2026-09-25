@@ -289,7 +289,7 @@ deploy_new_node() {
         echo -e "  ${COLOR_BOLD}API Token:${COLOR_RESET}     ${COLOR_YELLOW}$node_token${COLOR_RESET}"
     fi
     echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
-    echo -e "${COLOR_BOLD}Public Certificate (Copy for Master Panel):${COLOR_RESET}"
+    echo -e "${COLOR_BOLD}Public Certificate :${COLOR_RESET}"
     echo -e "${COLOR_YELLOW}$cert_content${COLOR_RESET}"
     echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}\n"
 }
