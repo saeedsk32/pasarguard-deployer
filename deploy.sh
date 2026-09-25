@@ -236,7 +236,7 @@ deploy_new_node() {
         eval "$ssh_cmd 'cd /opt/pg-node && docker compose restart 2>/dev/null || docker restart node 2>/dev/null || true'"
 
         local token_candidate
-        token_candidate=$(eval "$ssh_cmd 'grep -E \"^[A-Z_]*KEY=\" /opt/pg-node/.env 2>/dev/null | cut -d\"=\" -f2 | tr -d \" \\r\\n\"'" | grep -oE '[0-9a-fA-F-]{36}' | head -n 1 || true)
+        token_candidate=$(eval "$ssh_cmd 'grep -E \"^(API_KEY|NODE_API_KEY|API_TOKEN)=\" /opt/pg-node/.env 2>/dev/null | cut -d\"=\" -f2 | tr -d \" \\r\\n\"'" | grep -oE '[0-9a-fA-F-]{36}' | head -n 1 || true)
         if [ -n "$token_candidate" ]; then
             node_token="$token_candidate"
         fi
@@ -315,9 +315,10 @@ manage_saved_nodes() {
 
     local ssh_cmd="sshpass -p '$target_pass' ssh -p $target_port -o StrictHostKeyChecking=no $target_user@$target_ip"
 
-    if [ -z "$target_token" ] || [[ "$target_token" == *"#"* ]] || [ "$target_token" == "Not detected" ]; then
+    # Always fetch live fresh token if missing, malformed, or full key string
+    if [ -z "$target_token" ] || [[ "$target_token" == *"#"* ]] || [ "$target_token" == "Not detected" ] || [ ${#target_token} -gt 36 ]; then
         local live_tok
-        live_tok=$(eval "$ssh_cmd 'grep -E \"^[A-Z_]*KEY=\" /opt/pg-node/.env 2>/dev/null | cut -d\"=\" -f2 | tr -d \" \\r\\n\"'" | grep -oE '[0-9a-fA-F-]{36}' | head -n 1 || true)
+        live_tok=$(eval "$ssh_cmd 'grep -E \"^(API_KEY|NODE_API_KEY|API_TOKEN)=\" /opt/pg-node/.env 2>/dev/null | cut -d\"=\" -f2 | tr -d \" \\r\\n\"'" | grep -oE '[0-9a-fA-F-]{36}' | head -n 1 || true)
         if [ -n "$live_tok" ]; then
             target_token="$live_tok"
             local tmp_sync
@@ -330,9 +331,10 @@ manage_saved_nodes() {
     echo "  1) View Panel Connection Info (Address, Ports, Token and Full Card)"
     echo "  2) Restart PasarGuard Node Container / Service"
     echo "  3) Re-sync Wildcard SSL"
-    echo "  4) Delete Node from Local Inventory"
-    echo "  5) Cancel"
-    read -rp "Action [1-5]: " N_ACT
+    echo "  4) Delete Node from Local Inventory Only"
+    echo "  5) Completely Uninstall Node from Server, Cloudflare & Inventory"
+    echo "  6) Cancel"
+    read -rp "Action [1-6]: " N_ACT
 
     case "$N_ACT" in
         1)
@@ -354,13 +356,10 @@ manage_saved_nodes() {
             echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}\n"
             ;;
         2)
-            eval "$ssh_cmd 'cat /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || cat /var/lib/pasarguard/ssl/cert.pem'" || log ERROR "Failed to read cert."
-            ;;
-        3)
             eval "$ssh_cmd 'cd /opt/pg-node && docker compose restart 2>/dev/null || docker restart node 2>/dev/null || true'"
             log OK "Restart command dispatched."
             ;;
-        4)
+        3)
             local c_src="/etc/letsencrypt/live/$target_bdom/fullchain.pem"
             local k_src="/etc/letsencrypt/live/$target_bdom/privkey.pem"
             cat "$c_src" | eval "$ssh_cmd 'cat > /var/lib/pg-node/certs/ssl_cert.pem && cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pasarguard/ssl/cert.pem'"
@@ -368,11 +367,46 @@ manage_saved_nodes() {
             eval "$ssh_cmd 'cd /opt/pg-node && docker compose restart 2>/dev/null || docker restart node 2>/dev/null || true'"
             log OK "Wildcard SSL re-synced and service restarted."
             ;;
-        5)
+        4)
             local tmp_d
             tmp_d=$(mktemp)
             jq "del(.[$((N_IDX - 1))])" "$NODES_FILE" > "$tmp_d" && mv "$tmp_d" "$NODES_FILE"
-            log OK "Node removed from local inventory."
+            log OK "Node removed from local inventory only."
+            ;;
+        5)
+            echo -e "${COLOR_RED}${COLOR_BOLD}WARNING: This will completely destroy all PasarGuard node data, remove docker containers, delete certificates on $target_ip, clean up Cloudflare DNS, and delete the node profile!${COLOR_RESET}"
+            read -rp "Are you absolutely sure? Type 'yes' to proceed: " CONFIRM_PURGE
+            if [ "$CONFIRM_PURGE" == "yes" ]; then
+                log INFO "Stopping and purging PasarGuard Node on $target_ip..."
+                eval "$ssh_cmd 'cd /opt/pg-node 2>/dev/null && docker compose down -v --remove-orphans 2>/dev/null || docker rm -f node 2>/dev/null || true'"
+                eval "$ssh_cmd 'rm -rf /opt/pg-node /var/lib/pg-node /var/lib/pasarguard /usr/local/bin/pg-node /etc/sysctl.d/99-bbr.conf'"
+                eval "$ssh_cmd 'ufw delete allow $target_sport/tcp 2>/dev/null || true; ufw delete allow $target_aport/tcp 2>/dev/null || true'"
+                log OK "Remote server cleaned up."
+
+                # Delete Cloudflare DNS record
+                local cf_tok cf_zid
+                cf_tok=$(jq -r --arg bd "$target_bdom" '.[] | select(.domain == $bd) | .token' "$DOMAINS_FILE")
+                cf_zid=$(jq -r --arg bd "$target_bdom" '.[] | select(.domain == $bd) | .zone_id' "$DOMAINS_FILE")
+                if [ -n "$cf_tok" ] && [ -n "$cf_zid" ]; then
+                    log INFO "Removing DNS record ($target_addr) from Cloudflare..."
+                    local rec_id
+                    rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records?name=$target_addr&type=A" \
+                         -H "Authorization: Bearer $cf_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty')
+                    if [ -n "$rec_id" ]; then
+                        curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records/$rec_id" \
+                             -H "Authorization: Bearer $cf_tok" -H "Content-Type: application/json" >/dev/null
+                        log OK "Cloudflare DNS record deleted."
+                    fi
+                fi
+
+                # Delete from local nodes.json
+                local tmp_del
+                tmp_del=$(mktemp)
+                jq "del(.[$((N_IDX - 1))])" "$NODES_FILE" > "$tmp_del" && mv "$tmp_del" "$NODES_FILE"
+                log OK "Node purged from inventory. Cleanup complete."
+            else
+                echo "Purge canceled."
+            fi
             ;;
         *)
             return 0
@@ -440,7 +474,7 @@ while true; do
     echo -e "  [1] Deploy New Node (Auto SSL Injection & Zero Self-Signed)"
     echo -e "  [2] Issue Wildcard SSL Certificate (Let's Encrypt + Cloudflare)"
     echo -e "  [3] Sync SSL to Local Master Server"
-    echo -e "  [4] Manage Saved Nodes (Inspect, Restart, Re-sync SSL)"
+    echo -e "  [4] Manage Saved Nodes (Inspect, Restart, Re-sync, Purge)"
     echo -e "  [5] Domain Profiles Manager"
     echo -e "  [6] Renew & Synchronize All SSLs"
     echo -e "  [7] View Execution Logs"
