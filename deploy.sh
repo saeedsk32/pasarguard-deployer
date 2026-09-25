@@ -166,10 +166,11 @@ deploy_new_node() {
     read -rp "Subdomain prefix for node [de1]: " SUBDOMAIN_PREFIX
     SUBDOMAIN_PREFIX=${SUBDOMAIN_PREFIX:-"de1"}
 
-    echo -e "\n${COLOR_CYAN}Port Configuration (Press Enter for Defaults):${COLOR_RESET}"
-    read -rp "Node Port (API Port for Panel Connection) [62050]: " API_PORT
+    echo -e "\n${COLOR_CYAN}Port Configuration (Press Enter to Accept Recommended Defaults):${COLOR_RESET}"
+    echo -e "${COLOR_YELLOW}Note: 'Node Port' is what PasarGuard Panel uses to connect.${COLOR_RESET}"
+    read -rp "Node Port (Panel Connection API Port) [62050]: " API_PORT
     API_PORT=${API_PORT:-62050}
-    read -rp "Service Port (Proxy Traffic Port) [62051]: " SERVICE_PORT
+    read -rp "Service Port (Traffic Proxy Port) [62051]: " SERVICE_PORT
     SERVICE_PORT=${SERVICE_PORT:-62051}
 
     read -rp "Install PasarGuard Node binary? [Y/n]: " INSTALL_PG
@@ -212,13 +213,13 @@ apt-get update -qq
 apt-get upgrade -qq -y
 ufw allow $API_PORT/tcp >/dev/null 2>&1 || true
 ufw allow $SERVICE_PORT/tcp >/dev/null 2>&1 || true
-mkdir -p /var/lib/pg-node/certs /var/lib/pasarguard/ssl /opt/pg-node
+mkdir -p /tmp/node_ssl /var/lib/pg-node/certs /var/lib/pasarguard/ssl /opt/pg-node
 REMOTE_INIT
 
-    log INFO "Pre-deploying Wildcard SSL to /var/lib/pg-node/certs/ and /var/lib/pasarguard/ssl/ ..."
-    cat "$cert_src" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat > /var/lib/pasarguard/ssl/cert.pem && cp /var/lib/pasarguard/ssl/cert.pem /var/lib/pg-node/certs/ssl_cert.pem && chmod 644 /var/lib/pasarguard/ssl/cert.pem /var/lib/pg-node/certs/ssl_cert.pem"
-    cat "$key_src" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat > /var/lib/pasarguard/ssl/key.pem && cp /var/lib/pasarguard/ssl/key.pem /var/lib/pg-node/certs/ssl_key.pem && chmod 600 /var/lib/pasarguard/ssl/key.pem /var/lib/pg-node/certs/ssl_key.pem"
-    log OK "Wildcard SSL pre-seeded successfully."
+    log INFO "Transferring Wildcard SSL source files to remote node..."
+    cat "$cert_src" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat > /tmp/node_ssl/cert.pem && chmod 644 /tmp/node_ssl/cert.pem"
+    cat "$key_src" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat > /tmp/node_ssl/key.pem && chmod 600 /tmp/node_ssl/key.pem"
+    log OK "Wildcard SSL uploaded successfully."
 
     log INFO "Configuring Cloudflare DNS A-record: $full_hostname -> $NODE_IP..."
     local check_dns_res record_id
@@ -251,21 +252,21 @@ export TERM=xterm-256color
 export DEBIAN_FRONTEND=noninteractive
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# دانلود و نصب اسکریپت رسمی
+# اطمینان از باینری رسمی
 curl -fsSL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh -o /usr/local/bin/pg-node
 chmod +x /usr/local/bin/pg-node
 /usr/local/bin/pg-node install-script >/dev/null 2>&1 || true
 
-# اجرای نصب رسمی نود با پرچم‌های مشخص
-/usr/local/bin/pg-node install -y --override --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $SERVICE_PORT --api-port $API_PORT $SYSTEMD_FLAG
+# نصب بدون خطای same file
+/usr/local/bin/pg-node install -y --override --cert-path /tmp/node_ssl/cert.pem --key-path /tmp/node_ssl/key.pem --service-port $SERVICE_PORT --api-port $API_PORT $SYSTEMD_FLAG
 /usr/local/bin/pg-node restart -n >/dev/null 2>&1 || true
+rm -rf /tmp/node_ssl
 REMOTE_INSTALL
 
-        # Re-enforce SSL after installer finishes
-        cat "$cert_src" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat > /var/lib/pg-node/certs/ssl_cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem"
-        cat "$key_src" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat > /var/lib/pg-node/certs/ssl_key.pem && chmod 600 /var/lib/pg-node/certs/ssl_key.pem"
+        # Wait briefly for Docker container and environment file to settle
+        sleep 2
 
-        # Fetch valid UUID token
+        # Extract UUID API Token directly
         local token_candidate
         token_candidate=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' /opt/pg-node/.env 2>/dev/null | head -n 1" || true)
         if [ -n "$token_candidate" ]; then
@@ -379,7 +380,7 @@ manage_saved_nodes() {
             echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
             echo -e "  ${COLOR_BOLD}Node Name:${COLOR_RESET}       $target_host"
             echo -e "  ${COLOR_BOLD}Address:${COLOR_RESET}         $target_addr"
-            echo -e "  ${COLOR_BOLD}Node Port (API):${COLOR_RESET} $target_aport  --> (Enter this in Panel 'Node Port')"
+            echo -e "  ${COLOR_BOLD}Node Port (API):${COLOR_RESET} $target_aport  --> (Set this in Panel 'Node Port')"
             echo -e "  ${COLOR_BOLD}Service Port:${COLOR_RESET}    $target_sport  --> (Traffic Proxy Port)"
             echo -e "  ${COLOR_BOLD}Cert Path:${COLOR_RESET}       /var/lib/pg-node/certs/ssl_cert.pem"
             echo -e "  ${COLOR_BOLD}Key Path:${COLOR_RESET}        /var/lib/pg-node/certs/ssl_key.pem"
