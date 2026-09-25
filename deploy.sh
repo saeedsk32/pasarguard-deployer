@@ -149,7 +149,7 @@ deploy_new_node() {
     selected_token=$(jq -r ".[$((DOM_IDX - 1))].token" "$DOMAINS_FILE")
     selected_zone=$(jq -r ".[$((DOM_IDX - 1))].zone_id" "$DOMAINS_FILE")
 
-    read -rp "Node Hostname (e.g. node-DE1): " NODE_NAME
+    read -rp "Node Name (e.g. node-DE1): " NODE_NAME
     NODE_NAME=${NODE_NAME:-"node-DE1"}
     read -rp "Node Server IP: " NODE_IP
     read -rp "SSH Port [22]: " NODE_SSH_PORT
@@ -166,11 +166,11 @@ deploy_new_node() {
     read -rp "Subdomain prefix for node [de1]: " SUBDOMAIN_PREFIX
     SUBDOMAIN_PREFIX=${SUBDOMAIN_PREFIX:-"de1"}
 
-    echo -e "\n${COLOR_CYAN}Port Configuration (Press Enter for Defaults):${COLOR_RESET}"
-    read -rp "Node Port (API Port for Panel Connection) [62050]: " API_PORT
-    API_PORT=${API_PORT:-62050}
-    read -rp "Service Port (Traffic Proxy Port) [62051]: " SERVICE_PORT
+    echo -e "\n${COLOR_CYAN}Port Configuration:${COLOR_RESET}"
+    read -rp "Node Port (Main Port in Panel) [62051]: " SERVICE_PORT
     SERVICE_PORT=${SERVICE_PORT:-62051}
+    read -rp "Advanced API Port (node-serviced Port) [19000]: " API_PORT
+    API_PORT=${API_PORT:-19000}
 
     echo -e "\n${COLOR_CYAN}Protocol Configuration:${COLOR_RESET}"
     read -rp "Select Protocol: [1] gRPC (Recommended/Default) or [2] REST [1]: " PROTO_CHOICE
@@ -222,8 +222,8 @@ echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.d/99-bbr.conf
 sysctl --system >/dev/null 2>&1 || true
 apt-get update -qq
 apt-get upgrade -qq -y
-ufw allow $API_PORT/tcp >/dev/null 2>&1 || true
 ufw allow $SERVICE_PORT/tcp >/dev/null 2>&1 || true
+ufw allow $API_PORT/tcp >/dev/null 2>&1 || true
 mkdir -p /tmp/node_ssl /var/lib/pg-node/certs /var/lib/pasarguard/ssl /opt/pg-node
 REMOTE_INIT
 
@@ -280,7 +280,6 @@ REMOTE_INSTALL
         fi
     fi
 
-    # استخراج فقط تکه اول گواهی تا زیر ۲۰۴۸ کاراکتر باشد و پنل ارور اندازه ندهد
     local leaf_cert
     leaf_cert=$(openssl x509 -in "$cert_src" 2>/dev/null || cat "$cert_src")
 
@@ -309,16 +308,14 @@ REMOTE_INSTALL
     echo -e "\n${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
     echo -e "${COLOR_GREEN}${COLOR_BOLD}       NODE DEPLOYMENT SUMMARY FOR PASARGUARD PANEL        ${COLOR_RESET}"
     echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
-    echo -e "  ${COLOR_BOLD}Node Name:${COLOR_RESET}       $NODE_NAME"
-    echo -e "  ${COLOR_BOLD}Address:${COLOR_RESET}         $full_hostname"
-    echo -e "  ${COLOR_BOLD}Node Port (API):${COLOR_RESET} $API_PORT  --> (Enter this in Panel 'Node Port')"
-    echo -e "  ${COLOR_BOLD}Service Port:${COLOR_RESET}    $SERVICE_PORT  --> (Traffic Proxy Port)"
-    echo -e "  ${COLOR_BOLD}Protocol:${COLOR_RESET}        ${COLOR_CYAN}${PROTO_NAME^^}${COLOR_RESET}"
-    echo -e "  ${COLOR_BOLD}Cert Path:${COLOR_RESET}       /var/lib/pg-node/certs/ssl_cert.pem"
-    echo -e "  ${COLOR_BOLD}Key Path:${COLOR_RESET}        /var/lib/pg-node/certs/ssl_key.pem"
-    echo -e "  ${COLOR_BOLD}API Token:${COLOR_RESET}       ${COLOR_YELLOW}${node_token}${COLOR_RESET}"
+    echo -e "  ${COLOR_BOLD}Node Name:${COLOR_RESET}        $NODE_NAME"
+    echo -e "  ${COLOR_BOLD}Address:${COLOR_RESET}          $full_hostname"
+    echo -e "  ${COLOR_BOLD}Node Port:${COLOR_RESET}        ${COLOR_GREEN}$SERVICE_PORT${COLOR_RESET}  --> [Enter in Panel 'Node Port']"
+    echo -e "  ${COLOR_BOLD}API Port:${COLOR_RESET}         ${COLOR_YELLOW}$API_PORT${COLOR_RESET}  --> [Enter in Advanced Settings 'API Port']"
+    echo -e "  ${COLOR_BOLD}Connection Type:${COLOR_RESET}  ${COLOR_CYAN}${PROTO_NAME^^}${COLOR_RESET}  --> [Select in Advanced Settings]"
+    echo -e "  ${COLOR_BOLD}API Key:${COLOR_RESET}          ${COLOR_YELLOW}${node_token}${COLOR_RESET}"
     echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
-    echo -e "${COLOR_BOLD}Public Certificate Content (Leaf / <2048 chars for Panel):${COLOR_RESET}"
+    echo -e "${COLOR_BOLD}Certificate (Copy exactly into Panel Certificate box):${COLOR_RESET}"
     echo -e "${COLOR_YELLOW}$leaf_cert${COLOR_RESET}"
     echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}\n"
 }
@@ -340,7 +337,7 @@ manage_saved_nodes() {
         return 1
     fi
 
-    local target_ip target_port target_user target_pass target_host target_addr target_sport target_aport target_token target_bdom
+    local target_ip target_port target_user target_pass target_host target_addr target_sport target_aport target_token target_bdom target_proto
     target_ip=$(jq -r ".[$((N_IDX - 1))].ip" "$NODES_FILE")
     target_port=$(jq -r ".[$((N_IDX - 1))].ssh_port" "$NODES_FILE")
     target_user=$(jq -r ".[$((N_IDX - 1))].ssh_user" "$NODES_FILE")
@@ -348,8 +345,9 @@ manage_saved_nodes() {
     target_host=$(jq -r ".[$((N_IDX - 1))].hostname" "$NODES_FILE")
     target_addr=$(jq -r ".[$((N_IDX - 1))].address" "$NODES_FILE")
     target_sport=$(jq -r ".[$((N_IDX - 1))].service_port // 62051" "$NODES_FILE")
-    target_aport=$(jq -r ".[$((N_IDX - 1))].api_port // 62050" "$NODES_FILE")
+    target_aport=$(jq -r ".[$((N_IDX - 1))].api_port // 19000" "$NODES_FILE")
     target_token=$(jq -r ".[$((N_IDX - 1))].api_token // empty" "$NODES_FILE")
+    target_proto=$(jq -r ".[$((N_IDX - 1))].protocol // 'grpc'" "$NODES_FILE")
     target_bdom=$(jq -r ".[$((N_IDX - 1))].base_domain" "$NODES_FILE")
 
     local ssh_cmd="sshpass -p '$target_pass' ssh -p $target_port -o StrictHostKeyChecking=no $target_user@$target_ip"
@@ -389,15 +387,14 @@ manage_saved_nodes() {
             echo -e "\n${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
             echo -e "${COLOR_GREEN}${COLOR_BOLD}            PASARGUARD PANEL CONNECTION DETAILS            ${COLOR_RESET}"
             echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
-            echo -e "  ${COLOR_BOLD}Node Name:${COLOR_RESET}       $target_host"
-            echo -e "  ${COLOR_BOLD}Address:${COLOR_RESET}         $target_addr"
-            echo -e "  ${COLOR_BOLD}Node Port (API):${COLOR_RESET} $target_aport  --> (Set this in Panel 'Node Port')"
-            echo -e "  ${COLOR_BOLD}Service Port:${COLOR_RESET}    $target_sport  --> (Traffic Proxy Port)"
-            echo -e "  ${COLOR_BOLD}Cert Path:${COLOR_RESET}       /var/lib/pg-node/certs/ssl_cert.pem"
-            echo -e "  ${COLOR_BOLD}Key Path:${COLOR_RESET}        /var/lib/pg-node/certs/ssl_key.pem"
-            echo -e "  ${COLOR_BOLD}API Token:${COLOR_RESET}       ${COLOR_YELLOW}${target_token:-Not found}${COLOR_RESET}"
+            echo -e "  ${COLOR_BOLD}Node Name:${COLOR_RESET}        $target_host"
+            echo -e "  ${COLOR_BOLD}Address:${COLOR_RESET}          $target_addr"
+            echo -e "  ${COLOR_BOLD}Node Port:${COLOR_RESET}        ${COLOR_GREEN}$target_sport${COLOR_RESET}  --> [Set in Panel 'Node Port']"
+            echo -e "  ${COLOR_BOLD}API Port:${COLOR_RESET}         ${COLOR_YELLOW}$target_aport${COLOR_RESET}  --> [Set in Advanced Settings 'API Port']"
+            echo -e "  ${COLOR_BOLD}Connection Type:${COLOR_RESET}  ${COLOR_CYAN}${target_proto^^}${COLOR_RESET}  --> [Select in Advanced Settings]"
+            echo -e "  ${COLOR_BOLD}API Key:${COLOR_RESET}          ${COLOR_YELLOW}${target_token:-Not found}${COLOR_RESET}"
             echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
-            echo -e "${COLOR_BOLD}Public Certificate Content (Leaf / <2048 chars for Panel):${COLOR_RESET}"
+            echo -e "${COLOR_BOLD}Certificate (Leaf / <2048 chars for Panel):${COLOR_RESET}"
             echo -e "${COLOR_YELLOW}$single_cert${COLOR_RESET}"
             echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}\n"
             ;;
@@ -414,10 +411,16 @@ manage_saved_nodes() {
             if [ "$PROTO_SEL" == "1" ]; then
                 log INFO "Configuring node to use gRPC protocol..."
                 eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node install -y --override --use-grpc --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $target_sport --api-port $target_aport'"
+                local tmp_upd
+                tmp_upd=$(mktemp)
+                jq --arg idx "$((N_IDX - 1))" '.[($idx|tonumber)].protocol = "grpc"' "$NODES_FILE" > "$tmp_upd" && mv "$tmp_upd" "$NODES_FILE"
                 log OK "Switched to gRPC protocol."
             elif [ "$PROTO_SEL" == "2" ]; then
                 log INFO "Configuring node to use REST protocol..."
                 eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node install -y --override --use-rest --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $target_sport --api-port $target_aport'"
+                local tmp_upd
+                tmp_upd=$(mktemp)
+                jq --arg idx "$((N_IDX - 1))" '.[($idx|tonumber)].protocol = "rest"' "$NODES_FILE" > "$tmp_upd" && mv "$tmp_upd" "$NODES_FILE"
                 log OK "Switched to REST protocol."
             fi
             ;;
