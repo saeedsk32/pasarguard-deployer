@@ -244,7 +244,7 @@ deploy_new_node() {
 
         # Extract API token from /opt/pg-node/.env or docker logs
         local token_candidate
-        token_candidate=$(eval "$ssh_cmd 'grep -iE \"API_KEY|KEY|TOKEN\" /opt/pg-node/.env 2>/dev/null | cut -d\"=\" -f2 | tr -d \" \\r\\n\"'" || true)
+        token_candidate=$(eval "$ssh_cmd \'grep -E \"^[A-Z_]*KEY=\" /opt/pg-node/.env 2>/dev/null | cut -d\"=\" -f2 | tr -d \" \r\n\"\' | grep -oE \"[0-9a-fA-F-]{36}\" | head -n 1) || true
         if [ -n "$token_candidate" ]; then
             node_token="$token_candidate"
         fi
@@ -302,7 +302,8 @@ manage_saved_nodes() {
         return 0
     fi
 
-    echo -e "\n${COLOR_CYAN}--- Saved Node Inventory ---${COLOR_RESET}"
+    echo -e "
+${COLOR_CYAN}--- Saved Node Inventory ---${COLOR_RESET}"
     jq -r 'to_entries[] | "  [\(.key + 1)] \(.value.hostname) (\(.value.ip)) - \(.value.address)"' "$NODES_FILE"
 
     read -rp "Select Node [1-$count]: " N_IDX
@@ -311,41 +312,80 @@ manage_saved_nodes() {
         return 1
     fi
 
-    local target_ip target_port target_user target_pass
+    local target_ip target_port target_user target_pass target_host target_addr target_sport target_aport target_token target_bdom
     target_ip=$(jq -r ".[$((N_IDX - 1))].ip" "$NODES_FILE")
     target_port=$(jq -r ".[$((N_IDX - 1))].ssh_port" "$NODES_FILE")
     target_user=$(jq -r ".[$((N_IDX - 1))].ssh_user" "$NODES_FILE")
     target_pass=$(jq -r ".[$((N_IDX - 1))].ssh_pass" "$NODES_FILE")
+    target_host=$(jq -r ".[$((N_IDX - 1))].hostname" "$NODES_FILE")
+    target_addr=$(jq -r ".[$((N_IDX - 1))].address" "$NODES_FILE")
+    target_sport=$(jq -r ".[$((N_IDX - 1))].service_port // 62050" "$NODES_FILE")
+    target_aport=$(jq -r ".[$((N_IDX - 1))].api_port // 62051" "$NODES_FILE")
+    target_token=$(jq -r ".[$((N_IDX - 1))].api_token // empty" "$NODES_FILE")
+    target_bdom=$(jq -r ".[$((N_IDX - 1))].base_domain" "$NODES_FILE")
 
     local ssh_cmd="sshpass -p '$target_pass' ssh -p $target_port -o StrictHostKeyChecking=no $target_user@$target_ip"
 
-    echo -e "\nActions for node ($target_ip):"
-    echo "  1) View Public SSL Certificate Content"
-    echo "  2) Restart PasarGuard Node Container / Service"
-    echo "  3) Re-sync Wildcard SSL (Overwrites any self-signed cert)"
-    echo "  4) Delete Node from Local Inventory"
-    echo "  5) Cancel"
-    read -rp "Action [1-5]: " N_ACT
+    # Always fetch live fresh token if missing or malformed
+    if [ -z "$target_token" ] || [[ "$target_token" == *"#"* ]] || [ "$target_token" == "Not detected" ]; then
+        local live_tok
+        live_tok=$(eval "$ssh_cmd 'grep -E "^[A-Z_]*KEY=" /opt/pg-node/.env 2>/dev/null | cut -d"=" -f2 | tr -d " 
+"' | grep -oE '[0-9a-fA-F-]{36}' | head -n 1" || true)
+        if [ -n "$live_tok" ]; then
+            target_token="$live_tok"
+            local tmp_sync
+            tmp_sync=$(mktemp)
+            jq --arg idx "$((N_IDX - 1))" --arg tok "$live_tok" '.[($idx|tonumber)].api_token = $tok' "$NODES_FILE" > "$tmp_sync" && mv "$tmp_sync" "$NODES_FILE"
+        fi
+    fi
+
+    echo -e "
+Actions for node ($target_host - $target_ip):"
+    echo "  1) View Panel Connection Info (Address, Ports, Token & Full Card)"
+    echo "  2) View Raw Public Certificate Content"
+    echo "  3) Restart PasarGuard Node Container / Service"
+    echo "  4) Re-sync Wildcard SSL (Overwrites any self-signed cert)"
+    echo "  5) Delete Node from Local Inventory"
+    echo "  6) Cancel"
+    read -rp "Action [1-6]: " N_ACT
 
     case "$N_ACT" in
         1)
-            eval "$ssh_cmd 'cat /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || cat /var/lib/pasarguard/ssl/cert.pem'" || log ERROR "Failed to read cert."
+            local cert_data
+            cert_data=$(eval "$ssh_cmd 'cat /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || cat /var/lib/pasarguard/ssl/cert.pem 2>/dev/null'" || true)
+            echo -e "
+${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
+            echo -e "${COLOR_GREEN}${COLOR_BOLD}            PASARGUARD PANEL CONNECTION DETAILS            ${COLOR_RESET}"
+            echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
+            echo -e "  ${COLOR_BOLD}Node Name:${COLOR_RESET}     $target_host"
+            echo -e "  ${COLOR_BOLD}Address:${COLOR_RESET}       $target_addr"
+            echo -e "  ${COLOR_BOLD}Service Port:${COLOR_RESET}  $target_sport"
+            echo -e "  ${COLOR_BOLD}API Port:${COLOR_RESET}      $target_aport"
+            echo -e "  ${COLOR_BOLD}Cert Path:${COLOR_RESET}     /var/lib/pg-node/certs/ssl_cert.pem"
+            echo -e "  ${COLOR_BOLD}Key Path:${COLOR_RESET}      /var/lib/pg-node/certs/ssl_key.pem"
+            echo -e "  ${COLOR_BOLD}API Token:${COLOR_RESET}     ${COLOR_YELLOW}${target_token:-Not found}${COLOR_RESET}"
+            echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
+            echo -e "${COLOR_BOLD}Public Certificate Content:${COLOR_RESET}"
+            echo -e "${COLOR_YELLOW}$cert_data${COLOR_RESET}"
+            echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}
+"
             ;;
         2)
+            eval "$ssh_cmd 'cat /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || cat /var/lib/pasarguard/ssl/cert.pem'" || log ERROR "Failed to read cert."
+            ;;
+        3)
             eval "$ssh_cmd 'cd /opt/pg-node && docker compose restart 2>/dev/null || docker restart node 2>/dev/null || true'"
             log OK "Restart command dispatched."
             ;;
-        3)
-            local bdom
-            bdom=$(jq -r ".[$((N_IDX - 1))].base_domain" "$NODES_FILE")
-            local c_src="/etc/letsencrypt/live/$bdom/fullchain.pem"
-            local k_src="/etc/letsencrypt/live/$bdom/privkey.pem"
+        4)
+            local c_src="/etc/letsencrypt/live/$target_bdom/fullchain.pem"
+            local k_src="/etc/letsencrypt/live/$target_bdom/privkey.pem"
             cat "$c_src" | eval "$ssh_cmd 'cat > /var/lib/pg-node/certs/ssl_cert.pem && cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pasarguard/ssl/cert.pem'"
             cat "$k_src" | eval "$ssh_cmd 'cat > /var/lib/pg-node/certs/ssl_key.pem && cat > /var/lib/pasarguard/ssl/key.pem && chmod 600 /var/lib/pg-node/certs/ssl_key.pem /var/lib/pasarguard/ssl/key.pem'"
             eval "$ssh_cmd 'cd /opt/pg-node && docker compose restart 2>/dev/null || docker restart node 2>/dev/null || true'"
             log OK "Wildcard SSL re-synced and service restarted."
             ;;
-        4)
+        5)
             local tmp_d
             tmp_d=$(mktemp)
             jq "del(.[$((N_IDX - 1))])" "$NODES_FILE" > "$tmp_d" && mv "$tmp_d" "$NODES_FILE"
