@@ -166,12 +166,21 @@ deploy_new_node() {
     read -rp "Subdomain prefix for node [de1]: " SUBDOMAIN_PREFIX
     SUBDOMAIN_PREFIX=${SUBDOMAIN_PREFIX:-"de1"}
 
-    echo -e "\n${COLOR_CYAN}Port Configuration (Press Enter to Accept Recommended Defaults):${COLOR_RESET}"
-    echo -e "${COLOR_YELLOW}Note: 'Node Port' is what PasarGuard Panel uses to connect.${COLOR_RESET}"
-    read -rp "Node Port (Panel Connection API Port) [62050]: " API_PORT
+    echo -e "\n${COLOR_CYAN}Port Configuration (Press Enter for Defaults):${COLOR_RESET}"
+    read -rp "Node Port (API Port for Panel Connection) [62050]: " API_PORT
     API_PORT=${API_PORT:-62050}
     read -rp "Service Port (Traffic Proxy Port) [62051]: " SERVICE_PORT
     SERVICE_PORT=${SERVICE_PORT:-62051}
+
+    echo -e "\n${COLOR_CYAN}Protocol Configuration:${COLOR_RESET}"
+    read -rp "Select Protocol: [1] gRPC (Recommended/Default) or [2] REST [1]: " PROTO_CHOICE
+    local PROTO_FLAG="--use-grpc"
+    local PROTO_NAME="grpc"
+    if [ "$PROTO_CHOICE" == "2" ] || [[ "$PROTO_CHOICE" =~ ^[Rr] ]]; then
+        PROTO_FLAG="--use-rest"
+        PROTO_NAME="rest"
+    fi
+    log INFO "Selected protocol: $PROTO_NAME"
 
     read -rp "Install PasarGuard Node binary? [Y/n]: " INSTALL_PG
     INSTALL_PG=${INSTALL_PG:-Y}
@@ -186,7 +195,9 @@ deploy_new_node() {
     fi
 
     local full_hostname="$SUBDOMAIN_PREFIX.$selected_domain"
-    local cert_src="/etc/letsencrypt/live/$selected_domain/fullchain.pem"
+    local cert_src="/etc/letsencrypt/live/$selected_domain/cert.pem"
+    [ ! -f "$cert_src" ] && cert_src="/etc/letsencrypt/live/$selected_domain/fullchain.pem"
+    local fullchain_src="/etc/letsencrypt/live/$selected_domain/fullchain.pem"
     local key_src="/etc/letsencrypt/live/$selected_domain/privkey.pem"
 
     if [ ! -f "$cert_src" ] || [ ! -f "$key_src" ]; then
@@ -217,7 +228,7 @@ mkdir -p /tmp/node_ssl /var/lib/pg-node/certs /var/lib/pasarguard/ssl /opt/pg-no
 REMOTE_INIT
 
     log INFO "Transferring Wildcard SSL source files to remote node..."
-    cat "$cert_src" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat > /tmp/node_ssl/cert.pem && chmod 644 /tmp/node_ssl/cert.pem"
+    cat "$fullchain_src" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat > /tmp/node_ssl/cert.pem && chmod 644 /tmp/node_ssl/cert.pem"
     cat "$key_src" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat > /tmp/node_ssl/key.pem && chmod 600 /tmp/node_ssl/key.pem"
     log OK "Wildcard SSL uploaded successfully."
 
@@ -246,27 +257,22 @@ REMOTE_INIT
 
     local node_token="Not detected"
     if [[ "$INSTALL_PG" =~ ^[Yy]$ ]]; then
-        log INFO "Installing PasarGuard Node cleanly via official repository..."
+        log INFO "Installing PasarGuard Node cleanly ($PROTO_NAME mode)..."
         sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" bash << REMOTE_INSTALL
 export TERM=xterm-256color
 export DEBIAN_FRONTEND=noninteractive
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# اطمینان از باینری رسمی
 curl -fsSL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh -o /usr/local/bin/pg-node
 chmod +x /usr/local/bin/pg-node
 /usr/local/bin/pg-node install-script >/dev/null 2>&1 || true
 
-# نصب بدون خطای same file
-/usr/local/bin/pg-node install -y --override --cert-path /tmp/node_ssl/cert.pem --key-path /tmp/node_ssl/key.pem --service-port $SERVICE_PORT --api-port $API_PORT $SYSTEMD_FLAG
+/usr/local/bin/pg-node install -y --override $PROTO_FLAG --cert-path /tmp/node_ssl/cert.pem --key-path /tmp/node_ssl/key.pem --service-port $SERVICE_PORT --api-port $API_PORT $SYSTEMD_FLAG
 /usr/local/bin/pg-node restart -n >/dev/null 2>&1 || true
 rm -rf /tmp/node_ssl
 REMOTE_INSTALL
 
-        # Wait briefly for Docker container and environment file to settle
         sleep 2
-
-        # Extract UUID API Token directly
         local token_candidate
         token_candidate=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' /opt/pg-node/.env 2>/dev/null | head -n 1" || true)
         if [ -n "$token_candidate" ]; then
@@ -274,14 +280,15 @@ REMOTE_INSTALL
         fi
     fi
 
-    local cert_content
-    cert_content=$(cat "$cert_src")
+    # استخراج فقط تکه اول گواهی تا زیر ۲۰۴۸ کاراکتر باشد و پنل ارور اندازه ندهد
+    local leaf_cert
+    leaf_cert=$(openssl x509 -in "$cert_src" 2>/dev/null || cat "$cert_src")
 
     local tmp_node
     tmp_node=$(mktemp)
     jq --arg nm "$NODE_NAME" --arg ip "$NODE_IP" --arg pt "$NODE_SSH_PORT" --arg usr "$NODE_SSH_USER" \
        --arg pwd "$NODE_SSH_PASS" --arg dom "$full_hostname" --arg bdom "$selected_domain" \
-       --arg sport "$SERVICE_PORT" --arg aport "$API_PORT" --arg tok "$node_token" \
+       --arg sport "$SERVICE_PORT" --arg aport "$API_PORT" --arg tok "$node_token" --arg proto "$PROTO_NAME" \
        'map(select(.hostname != $nm)) + [{
           "hostname": $nm,
           "ip": $ip,
@@ -293,6 +300,7 @@ REMOTE_INSTALL
           "service_port": $sport,
           "api_port": $aport,
           "api_token": $tok,
+          "protocol": $proto,
           "ssl_cert_path": "/var/lib/pg-node/certs/ssl_cert.pem",
           "ssl_key_path": "/var/lib/pg-node/certs/ssl_key.pem",
           "deployed_at": (now | todate)
@@ -305,12 +313,13 @@ REMOTE_INSTALL
     echo -e "  ${COLOR_BOLD}Address:${COLOR_RESET}         $full_hostname"
     echo -e "  ${COLOR_BOLD}Node Port (API):${COLOR_RESET} $API_PORT  --> (Enter this in Panel 'Node Port')"
     echo -e "  ${COLOR_BOLD}Service Port:${COLOR_RESET}    $SERVICE_PORT  --> (Traffic Proxy Port)"
+    echo -e "  ${COLOR_BOLD}Protocol:${COLOR_RESET}        ${COLOR_CYAN}${PROTO_NAME^^}${COLOR_RESET}"
     echo -e "  ${COLOR_BOLD}Cert Path:${COLOR_RESET}       /var/lib/pg-node/certs/ssl_cert.pem"
     echo -e "  ${COLOR_BOLD}Key Path:${COLOR_RESET}        /var/lib/pg-node/certs/ssl_key.pem"
     echo -e "  ${COLOR_BOLD}API Token:${COLOR_RESET}       ${COLOR_YELLOW}${node_token}${COLOR_RESET}"
     echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
-    echo -e "${COLOR_BOLD}Public Certificate Content:${COLOR_RESET}"
-    echo -e "${COLOR_YELLOW}$cert_content${COLOR_RESET}"
+    echo -e "${COLOR_BOLD}Public Certificate Content (Leaf / <2048 chars for Panel):${COLOR_RESET}"
+    echo -e "${COLOR_YELLOW}$leaf_cert${COLOR_RESET}"
     echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}\n"
 }
 
@@ -375,6 +384,8 @@ manage_saved_nodes() {
         1)
             local cert_data
             cert_data=$(eval "$ssh_cmd 'cat /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || cat /var/lib/pasarguard/ssl/cert.pem 2>/dev/null'" || true)
+            local single_cert
+            single_cert=$(echo "$cert_data" | openssl x509 2>/dev/null || echo "$cert_data")
             echo -e "\n${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
             echo -e "${COLOR_GREEN}${COLOR_BOLD}            PASARGUARD PANEL CONNECTION DETAILS            ${COLOR_RESET}"
             echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
@@ -386,8 +397,8 @@ manage_saved_nodes() {
             echo -e "  ${COLOR_BOLD}Key Path:${COLOR_RESET}        /var/lib/pg-node/certs/ssl_key.pem"
             echo -e "  ${COLOR_BOLD}API Token:${COLOR_RESET}       ${COLOR_YELLOW}${target_token:-Not found}${COLOR_RESET}"
             echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
-            echo -e "${COLOR_BOLD}Public Certificate Content:${COLOR_RESET}"
-            echo -e "${COLOR_YELLOW}$cert_data${COLOR_RESET}"
+            echo -e "${COLOR_BOLD}Public Certificate Content (Leaf / <2048 chars for Panel):${COLOR_RESET}"
+            echo -e "${COLOR_YELLOW}$single_cert${COLOR_RESET}"
             echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}\n"
             ;;
         2)
