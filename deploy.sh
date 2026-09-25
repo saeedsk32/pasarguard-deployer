@@ -5,9 +5,10 @@
 # Optimized for official PasarGuard node SSL path: /var/lib/pasarguard/ssl/
 # ==============================================================================
 
-set -eo pipefail
+set -o pipefail
 
-APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+APP_DIR="$(cd "$(dirname "$REAL_PATH")" && pwd)"
 DOMAINS_FILE="$APP_DIR/domains.json"
 NODES_FILE="$APP_DIR/nodes.json"
 LOG_FILE="$APP_DIR/deployer.log"
@@ -162,7 +163,7 @@ deploy_new_node() {
     SERVICE_PORT=${SERVICE_PORT:-62050}
     read -rp "API Port [62051]: " API_PORT
     API_PORT=${API_PORT:-62051}
-    read -rp "Install PasarGuard Node binary? (Y/n): " INSTALL_PG
+    read -rp "Install PasarGuard Node binary via official script? (Y/n): " INSTALL_PG
     INSTALL_PG=${INSTALL_PG:-Y}
 
     local full_hostname="$SUBDOMAIN_PREFIX.$selected_domain"
@@ -225,17 +226,29 @@ deploy_new_node() {
     fi
     log OK "Cloudflare DNS configured (Proxied: False)."
 
+    local node_token="Not detected automatically"
     if [[ "$INSTALL_PG" =~ ^[Yy]$ ]]; then
-        log INFO "Deploying PasarGuard node script..."
-        eval "$ssh_cmd 'curl -fsSL https://raw.githubusercontent.com/pasarguard/node/main/install.sh | bash || true'"
+        log INFO "Running official PasarGuard Node installer on remote server..."
+        eval "$ssh_cmd 'sudo bash -c \"\$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)\" @ install'" || true
+        
+        # Try extracting API token from common environment / config files
+        local token_candidate
+        token_candidate=$(eval "$ssh_cmd 'grep -rhoE \"[a-zA-Z0-9_-]{20,}\" /var/lib/pasarguard/ /etc/pasarguard/ /opt/pasarguard/ 2>/dev/null | head -n 1'" || true)
+        if [ -n "$token_candidate" ]; then
+            node_token="$token_candidate"
+        fi
     fi
+
+    # Read public cert content for 1-click copy-paste
+    local cert_content
+    cert_content=$(cat "$cert_src")
 
     # Save to nodes DB
     local tmp_node
     tmp_node=$(mktemp)
     jq --arg nm "$NODE_NAME" --arg ip "$NODE_IP" --arg pt "$NODE_SSH_PORT" --arg usr "$NODE_SSH_USER" \
        --arg pwd "$NODE_SSH_PASS" --arg dom "$full_hostname" --arg bdom "$selected_domain" \
-       --arg sport "$SERVICE_PORT" --arg aport "$API_PORT" \
+       --arg sport "$SERVICE_PORT" --arg aport "$API_PORT" --arg tok "$node_token" \
        'map(select(.hostname != $nm)) + [{
           "hostname": $nm,
           "ip": $ip,
@@ -246,6 +259,7 @@ deploy_new_node() {
           "base_domain": $bdom,
           "service_port": $sport,
           "api_port": $aport,
+          "api_token": $tok,
           "ssl_cert_path": "/var/lib/pasarguard/ssl/cert.pem",
           "ssl_key_path": "/var/lib/pasarguard/ssl/key.pem",
           "deployed_at": (now | todate)
@@ -256,11 +270,17 @@ deploy_new_node() {
     echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
     echo -e "  ${COLOR_BOLD}Node Name:${COLOR_RESET}     $NODE_NAME"
     echo -e "  ${COLOR_BOLD}Address:${COLOR_RESET}       $full_hostname"
-    echo -e "  ${COLOR_BOLD}Cert Path:${COLOR_RESET}     /var/lib/pasarguard/ssl/cert.pem"
-    echo -e "  ${COLOR_BOLD}Key Path:${COLOR_RESET}      /var/lib/pasarguard/ssl/key.pem"
     echo -e "  ${COLOR_BOLD}Service Port:${COLOR_RESET}  $SERVICE_PORT"
     echo -e "  ${COLOR_BOLD}API Port:${COLOR_RESET}      $API_PORT"
-    echo -e "${COLOR_GREEN}============================================================${COLOR_RESET}\n"
+    echo -e "  ${COLOR_BOLD}Cert Path:${COLOR_RESET}     /var/lib/pasarguard/ssl/cert.pem"
+    echo -e "  ${COLOR_BOLD}Key Path:${COLOR_RESET}      /var/lib/pasarguard/ssl/key.pem"
+    if [ "$node_token" != "Not detected automatically" ]; then
+        echo -e "  ${COLOR_BOLD}API Token:${COLOR_RESET}     ${COLOR_YELLOW}$node_token${COLOR_RESET}"
+    fi
+    echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
+    echo -e "${COLOR_BOLD}Public Certificate Content (Copy for Panel if required):${COLOR_RESET}"
+    echo -e "${COLOR_YELLOW}$cert_content${COLOR_RESET}"
+    echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}\n"
 }
 
 manage_saved_nodes() {
@@ -301,11 +321,11 @@ manage_saved_nodes() {
             eval "$ssh_cmd 'cat /var/lib/pasarguard/ssl/cert.pem'" || log ERROR "Failed to read cert."
             ;;
         2)
-            eval "$ssh_cmd 'docker restart \$(docker ps -q --filter ancestor=pasarguard/node) 2>/dev/null || systemctl restart pasarguard-node || true'"
+            eval "$ssh_cmd 'pg-node restart 2>/dev/null || docker restart \$(docker ps -q --filter ancestor=pasarguard/node) 2>/dev/null || true'"
             log OK "Restart command dispatched."
             ;;
         3)
-            eval "$ssh_cmd 'curl -fsSL https://raw.githubusercontent.com/pasarguard/node/main/install.sh | bash || true'"
+            eval "$ssh_cmd 'sudo bash -c \"\$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)\" @ install || true'"
             log OK "Update script dispatched."
             ;;
         4)
@@ -346,7 +366,6 @@ renew_sync_all_ssl() {
             sudo chmod 644 /var/lib/pasarguard/ssl/cert.pem
             sudo chmod 600 /var/lib/pasarguard/ssl/key.pem
 
-            # Sync to all nodes belonging to this base domain
             local node_count
             node_count=$(jq '. | length' "$NODES_FILE")
             for n in $(seq 0 $((node_count - 1))); do
@@ -362,7 +381,7 @@ renew_sync_all_ssl() {
                     local sc="sshpass -p '$npass' ssh -p $nport -o StrictHostKeyChecking=no $nuser@$nip"
                     cat "$cert" | eval "$sc 'cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pasarguard/ssl/cert.pem'"
                     cat "$key" | eval "$sc 'cat > /var/lib/pasarguard/ssl/key.pem && chmod 600 /var/lib/pasarguard/ssl/key.pem'"
-                    eval "$sc 'docker restart \$(docker ps -q --filter ancestor=pasarguard/node) 2>/dev/null || true'"
+                    eval "$sc 'pg-node restart 2>/dev/null || docker restart \$(docker ps -q --filter ancestor=pasarguard/node) 2>/dev/null || true'"
                 fi
             done
         fi
