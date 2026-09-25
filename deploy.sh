@@ -68,12 +68,12 @@ list_domain_profiles() {
         return 1
     fi
     echo -e "${COLOR_CYAN}Registered Domain Profiles:${COLOR_RESET}"
-    jq -r 'to_entries[] | "  [\(.key + 1)] \(.value.domain) (Zone: \(.value.zone_id))"' "$DOMAINS_FILE"
+    jq -r 'to_entries[] | "  [" + ((.key + 1) | tostring) + "] " + .value.domain + " - Zone: " + .value.zone_id' "$DOMAINS_FILE"
     return 0
 }
 
 issue_wildcard_ssl() {
-    echo -e "\n${COLOR_BOLD}${COLOR_CYAN}--- Issue Wildcard SSL (Let's Encrypt + Cloudflare) ---${COLOR_RESET}"
+    echo -e "\n${COLOR_BOLD}${COLOR_CYAN}--- Issue Wildcard SSL: Let's Encrypt + Cloudflare ---${COLOR_RESET}"
     read -rp "Enter Base Domain (e.g. example.com): " DOMAIN
     DOMAIN=$(echo "$DOMAIN" | tr '[:upper:]' '[:lower:]' | xargs)
 
@@ -109,7 +109,6 @@ issue_wildcard_ssl() {
         
         log OK "Wildcard SSL certificate successfully generated."
 
-        # Sync locally to Master in official paths
         sudo mkdir -p "/var/lib/pasarguard/ssl" "/var/lib/pg-node/certs"
         sudo cat "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" | sudo tee "/var/lib/pasarguard/ssl/cert.pem" >/dev/null
         sudo cat "/etc/letsencrypt/live/$DOMAIN/privkey.pem" | sudo tee "/var/lib/pasarguard/ssl/key.pem" >/dev/null
@@ -151,7 +150,7 @@ deploy_new_node() {
     selected_token=$(jq -r ".[$((DOM_IDX - 1))].token" "$DOMAINS_FILE")
     selected_zone=$(jq -r ".[$((DOM_IDX - 1))].zone_id" "$DOMAINS_FILE")
 
-    read -rp "Node Hostname (e.g. node-de-01): " NODE_NAME
+    read -rp "Node Hostname: " NODE_NAME
     read -rp "Node Server IP: " NODE_IP
     read -rp "SSH Port [22]: " NODE_SSH_PORT
     NODE_SSH_PORT=${NODE_SSH_PORT:-22}
@@ -159,12 +158,12 @@ deploy_new_node() {
     NODE_SSH_USER=${NODE_SSH_USER:-root}
     read -rsp "SSH Password: " NODE_SSH_PASS
     echo ""
-    read -rp "Subdomain prefix for node (e.g. de1 => de1.$selected_domain): " SUBDOMAIN_PREFIX
+    read -rp "Subdomain prefix for node: " SUBDOMAIN_PREFIX
     read -rp "Service Port [62050]: " SERVICE_PORT
     SERVICE_PORT=${SERVICE_PORT:-62050}
     read -rp "API Port [62051]: " API_PORT
     API_PORT=${API_PORT:-62051}
-    read -rp "Install PasarGuard Node binary via official script? (Y/n): " INSTALL_PG
+    read -rp "Install PasarGuard Node binary? [Y/n]: " INSTALL_PG
     INSTALL_PG=${INSTALL_PG:-Y}
 
     local full_hostname="$SUBDOMAIN_PREFIX.$selected_domain"
@@ -195,7 +194,6 @@ deploy_new_node() {
     log INFO "Configuring firewall for PasarGuard ports ($SERVICE_PORT, $API_PORT)..."
     eval "$ssh_cmd 'ufw allow $SERVICE_PORT/tcp >/dev/null 2>&1 || true; ufw allow $API_PORT/tcp >/dev/null 2>&1 || true'"
 
-    # 1. Pre-seed certificates into both official paths BEFORE the installer runs
     log INFO "Pre-deploying Wildcard SSL to /var/lib/pg-node/certs/ and /var/lib/pasarguard/ssl/ ..."
     eval "$ssh_cmd 'mkdir -p /var/lib/pg-node/certs /var/lib/pasarguard/ssl /opt/pg-node'"
     
@@ -203,7 +201,6 @@ deploy_new_node() {
     cat "$key_src" | eval "$ssh_cmd 'cat > /var/lib/pasarguard/ssl/key.pem && cp /var/lib/pasarguard/ssl/key.pem /var/lib/pg-node/certs/ssl_key.pem && chmod 600 /var/lib/pasarguard/ssl/key.pem /var/lib/pg-node/certs/ssl_key.pem'"
     log OK "Wildcard SSL pre-seeded successfully."
 
-    # 2. Configure Cloudflare DNS A-record
     log INFO "Configuring Cloudflare DNS A-record: $full_hostname -> $NODE_IP..."
     local check_dns_res record_id
     check_dns_res=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$selected_zone/dns_records?name=$full_hostname&type=A" \
@@ -225,36 +222,29 @@ deploy_new_node() {
              -H "Content-Type: application/json" \
              --data "{\"type\":\"A\",\"name\":\"$full_hostname\",\"content\":\"$NODE_IP\",\"ttl\":1,\"proxied\":false}" >/dev/null
     fi
-    log OK "Cloudflare DNS configured (Proxied: False)."
+    log OK "Cloudflare DNS configured."
 
-    # 3. Run node installer & ensure our pre-seeded SSL is enforced
     local node_token="Not detected"
     if [[ "$INSTALL_PG" =~ ^[Yy]$ ]]; then
-        log INFO "Executing official pg-node installer (non-interactive mode)..."
-        # We pass newline to safely exit interactive SAN prompts without getting stuck
-        eval "$ssh_cmd 'printf \"\\n\\n\" | sudo bash -c \"\$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)\" @ install || true'"
+        log INFO "Executing official pg-node installer..."
+        eval "$ssh_cmd 'printf \"\n\n\" | sudo bash -c \"\$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)\" @ install || true'"
 
-        # Force-overwrite with our real Wildcard certs in case pg-node script generated self-signed
         log INFO "Enforcing official Wildcard SSL certificates over self-signed certs..."
         cat "$cert_src" | eval "$ssh_cmd 'cat > /var/lib/pg-node/certs/ssl_cert.pem && cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pasarguard/ssl/cert.pem'"
         cat "$key_src" | eval "$ssh_cmd 'cat > /var/lib/pg-node/certs/ssl_key.pem && cat > /var/lib/pasarguard/ssl/key.pem && chmod 600 /var/lib/pg-node/certs/ssl_key.pem /var/lib/pasarguard/ssl/key.pem'"
 
-        # Restart docker container to load the genuine Wildcard SSL immediately
         eval "$ssh_cmd 'cd /opt/pg-node && docker compose restart 2>/dev/null || docker restart node 2>/dev/null || true'"
 
-        # Extract API token from /opt/pg-node/.env or docker logs
         local token_candidate
-        token_candidate=$(eval "$ssh_cmd \'grep -E \"^[A-Z_]*KEY=\" /opt/pg-node/.env 2>/dev/null | cut -d\"=\" -f2 | tr -d \" \r\n\"\' | grep -oE \"[0-9a-fA-F-]{36}\" | head -n 1) || true
+        token_candidate=$(eval "$ssh_cmd 'grep -E \"^[A-Z_]*KEY=\" /opt/pg-node/.env 2>/dev/null | cut -d\"=\" -f2 | tr -d \" \\r\\n\"'" | grep -oE '[0-9a-fA-F-]{36}' | head -n 1 || true)
         if [ -n "$token_candidate" ]; then
             node_token="$token_candidate"
         fi
     fi
 
-    # Read public cert content for 1-click copy-paste
     local cert_content
     cert_content=$(cat "$cert_src")
 
-    # Save to nodes DB
     local tmp_node
     tmp_node=$(mktemp)
     jq --arg nm "$NODE_NAME" --arg ip "$NODE_IP" --arg pt "$NODE_SSH_PORT" --arg usr "$NODE_SSH_USER" \
@@ -283,13 +273,13 @@ deploy_new_node() {
     echo -e "  ${COLOR_BOLD}Address:${COLOR_RESET}       $full_hostname"
     echo -e "  ${COLOR_BOLD}Service Port:${COLOR_RESET}  $SERVICE_PORT"
     echo -e "  ${COLOR_BOLD}API Port:${COLOR_RESET}      $API_PORT"
-    echo -e "  ${COLOR_BOLD}Cert Path:${COLOR_RESET}     /var/lib/pg-node/certs/ssl_cert.pem "
-    echo -e "  ${COLOR_BOLD}Key Path:${COLOR_RESET}      /var/lib/pg-node/certs/ssl_key.pem  "
+    echo -e "  ${COLOR_BOLD}Cert Path:${COLOR_RESET}     /var/lib/pg-node/certs/ssl_cert.pem"
+    echo -e "  ${COLOR_BOLD}Key Path:${COLOR_RESET}      /var/lib/pg-node/certs/ssl_key.pem"
     if [ "$node_token" != "Not detected" ]; then
         echo -e "  ${COLOR_BOLD}API Token:${COLOR_RESET}     ${COLOR_YELLOW}$node_token${COLOR_RESET}"
     fi
     echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
-    echo -e "${COLOR_BOLD}Public Certificate :${COLOR_RESET}"
+    echo -e "${COLOR_BOLD}Public Certificate Content:${COLOR_RESET}"
     echo -e "${COLOR_YELLOW}$cert_content${COLOR_RESET}"
     echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}\n"
 }
@@ -302,9 +292,8 @@ manage_saved_nodes() {
         return 0
     fi
 
-    echo -e "
-${COLOR_CYAN}--- Saved Node Inventory ---${COLOR_RESET}"
-    jq -r 'to_entries[] | "  [\(.key + 1)] \(.value.hostname) (\(.value.ip)) - \(.value.address)"' "$NODES_FILE"
+    echo -e "\n${COLOR_CYAN}--- Saved Node Inventory ---${COLOR_RESET}"
+    jq -r 'to_entries[] | "  [" + ((.key + 1) | tostring) + "] " + .value.hostname + " (" + .value.ip + ") - " + .value.address' "$NODES_FILE"
 
     read -rp "Select Node [1-$count]: " N_IDX
     if ! [[ "$N_IDX" =~ ^[0-9]+$ ]] || [ "$N_IDX" -lt 1 ] || [ "$N_IDX" -gt "$count" ]; then
@@ -326,11 +315,9 @@ ${COLOR_CYAN}--- Saved Node Inventory ---${COLOR_RESET}"
 
     local ssh_cmd="sshpass -p '$target_pass' ssh -p $target_port -o StrictHostKeyChecking=no $target_user@$target_ip"
 
-    # Always fetch live fresh token if missing or malformed
     if [ -z "$target_token" ] || [[ "$target_token" == *"#"* ]] || [ "$target_token" == "Not detected" ]; then
         local live_tok
-        live_tok=$(eval "$ssh_cmd 'grep -E "^[A-Z_]*KEY=" /opt/pg-node/.env 2>/dev/null | cut -d"=" -f2 | tr -d " 
-"' | grep -oE '[0-9a-fA-F-]{36}' | head -n 1" || true)
+        live_tok=$(eval "$ssh_cmd 'grep -E \"^[A-Z_]*KEY=\" /opt/pg-node/.env 2>/dev/null | cut -d\"=\" -f2 | tr -d \" \\r\\n\"'" | grep -oE '[0-9a-fA-F-]{36}' | head -n 1 || true)
         if [ -n "$live_tok" ]; then
             target_token="$live_tok"
             local tmp_sync
@@ -339,12 +326,11 @@ ${COLOR_CYAN}--- Saved Node Inventory ---${COLOR_RESET}"
         fi
     fi
 
-    echo -e "
-Actions for node ($target_host - $target_ip):"
-    echo "  1) View Panel Connection Info (Address, Ports, Token & Full Card)"
+    echo -e "\nActions for node: $target_host - $target_ip"
+    echo "  1) View Panel Connection Info (Address, Ports, Token and Full Card)"
     echo "  2) View Raw Public Certificate Content"
     echo "  3) Restart PasarGuard Node Container / Service"
-    echo "  4) Re-sync Wildcard SSL (Overwrites any self-signed cert)"
+    echo "  4) Re-sync Wildcard SSL"
     echo "  5) Delete Node from Local Inventory"
     echo "  6) Cancel"
     read -rp "Action [1-6]: " N_ACT
@@ -353,8 +339,7 @@ Actions for node ($target_host - $target_ip):"
         1)
             local cert_data
             cert_data=$(eval "$ssh_cmd 'cat /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || cat /var/lib/pasarguard/ssl/cert.pem 2>/dev/null'" || true)
-            echo -e "
-${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
+            echo -e "\n${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
             echo -e "${COLOR_GREEN}${COLOR_BOLD}            PASARGUARD PANEL CONNECTION DETAILS            ${COLOR_RESET}"
             echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
             echo -e "  ${COLOR_BOLD}Node Name:${COLOR_RESET}     $target_host"
@@ -367,8 +352,7 @@ ${COLOR_GREEN}${COLOR_BOLD}=====================================================
             echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
             echo -e "${COLOR_BOLD}Public Certificate Content:${COLOR_RESET}"
             echo -e "${COLOR_YELLOW}$cert_data${COLOR_RESET}"
-            echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}
-"
+            echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}\n"
             ;;
         2)
             eval "$ssh_cmd 'cat /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || cat /var/lib/pasarguard/ssl/cert.pem'" || log ERROR "Failed to read cert."
