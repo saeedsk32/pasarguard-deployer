@@ -328,12 +328,11 @@ manage_saved_nodes() {
 
     echo -e "\nActions for node: $target_host - $target_ip"
     echo "  1) View Panel Connection Info (Address, Ports, Token and Full Card)"
-    echo "  2) View Raw Public Certificate Content"
-    echo "  3) Restart PasarGuard Node Container / Service"
-    echo "  4) Re-sync Wildcard SSL"
-    echo "  5) Delete Node from Local Inventory"
-    echo "  6) Cancel"
-    read -rp "Action [1-6]: " N_ACT
+    echo "  2) Restart PasarGuard Node Container / Service"
+    echo "  3) Re-sync Wildcard SSL"
+    echo "  4) Delete Node from Local Inventory"
+    echo "  5) Cancel"
+    read -rp "Action [1-5]: " N_ACT
 
     case "$N_ACT" in
         1)
