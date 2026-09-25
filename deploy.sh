@@ -2,7 +2,7 @@
 
 # ==============================================================================
 # PasarGuard Multi-Node Auto-Deployer
-# Optimized for official PasarGuard node SSL path: /var/lib/pasarguard/ssl/
+# Pre-injects official Wildcard SSL into /var/lib/pg-node/certs/ and /var/lib/pasarguard/ssl/
 # ==============================================================================
 
 set -o pipefail
@@ -109,15 +109,16 @@ issue_wildcard_ssl() {
         
         log OK "Wildcard SSL certificate successfully generated."
 
-        # Sync locally to Master in /var/lib/pasarguard/ssl/
-        sudo mkdir -p "/var/lib/pasarguard/ssl"
+        # Sync locally to Master in official paths
+        sudo mkdir -p "/var/lib/pasarguard/ssl" "/var/lib/pg-node/certs"
         sudo cat "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" | sudo tee "/var/lib/pasarguard/ssl/cert.pem" >/dev/null
         sudo cat "/etc/letsencrypt/live/$DOMAIN/privkey.pem" | sudo tee "/var/lib/pasarguard/ssl/key.pem" >/dev/null
-        sudo chmod 644 "/var/lib/pasarguard/ssl/cert.pem"
-        sudo chmod 600 "/var/lib/pasarguard/ssl/key.pem"
-        log OK "Master SSL synced to: /var/lib/pasarguard/ssl/"
+        sudo cp "/var/lib/pasarguard/ssl/cert.pem" "/var/lib/pg-node/certs/ssl_cert.pem"
+        sudo cp "/var/lib/pasarguard/ssl/key.pem" "/var/lib/pg-node/certs/ssl_key.pem"
+        sudo chmod 644 "/var/lib/pasarguard/ssl/cert.pem" "/var/lib/pg-node/certs/ssl_cert.pem"
+        sudo chmod 600 "/var/lib/pasarguard/ssl/key.pem" "/var/lib/pg-node/certs/ssl_key.pem"
+        log OK "Master SSL synced to: /var/lib/pasarguard/ssl/ and /var/lib/pg-node/certs/"
 
-        # Save profile
         local tmp_file
         tmp_file=$(mktemp)
         jq --arg dom "$DOMAIN" --arg tok "$CF_TOKEN" --arg zid "$ZONE_ID" --arg eml "$CONTACT_EMAIL" \
@@ -194,15 +195,15 @@ deploy_new_node() {
     log INFO "Configuring firewall for PasarGuard ports ($SERVICE_PORT, $API_PORT)..."
     eval "$ssh_cmd 'ufw allow $SERVICE_PORT/tcp >/dev/null 2>&1 || true; ufw allow $API_PORT/tcp >/dev/null 2>&1 || true'"
 
-    log INFO "Transferring Wildcard SSL to official path: /var/lib/pasarguard/ssl/ ..."
-    eval "$ssh_cmd 'mkdir -p /var/lib/pasarguard/ssl && chmod 755 /var/lib/pasarguard/ssl'"
+    # 1. Pre-seed certificates into both official paths BEFORE the installer runs
+    log INFO "Pre-deploying Wildcard SSL to /var/lib/pg-node/certs/ and /var/lib/pasarguard/ssl/ ..."
+    eval "$ssh_cmd 'mkdir -p /var/lib/pg-node/certs /var/lib/pasarguard/ssl /opt/pg-node'"
+    
+    cat "$cert_src" | eval "$ssh_cmd 'cat > /var/lib/pasarguard/ssl/cert.pem && cp /var/lib/pasarguard/ssl/cert.pem /var/lib/pg-node/certs/ssl_cert.pem && chmod 644 /var/lib/pasarguard/ssl/cert.pem /var/lib/pg-node/certs/ssl_cert.pem'"
+    cat "$key_src" | eval "$ssh_cmd 'cat > /var/lib/pasarguard/ssl/key.pem && cp /var/lib/pasarguard/ssl/key.pem /var/lib/pg-node/certs/ssl_key.pem && chmod 600 /var/lib/pasarguard/ssl/key.pem /var/lib/pg-node/certs/ssl_key.pem'"
+    log OK "Wildcard SSL pre-seeded successfully."
 
-    # Direct pipe to avoid broken symlinks and map to cert.pem and key.pem
-    cat "$cert_src" | eval "$ssh_cmd 'cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pasarguard/ssl/cert.pem'"
-    cat "$key_src" | eval "$ssh_cmd 'cat > /var/lib/pasarguard/ssl/key.pem && chmod 600 /var/lib/pasarguard/ssl/key.pem'"
-    log OK "SSL transferred successfully with secure permissions."
-
-    # Cloudflare DNS Setup
+    # 2. Configure Cloudflare DNS A-record
     log INFO "Configuring Cloudflare DNS A-record: $full_hostname -> $NODE_IP..."
     local check_dns_res record_id
     check_dns_res=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$selected_zone/dns_records?name=$full_hostname&type=A" \
@@ -226,14 +227,24 @@ deploy_new_node() {
     fi
     log OK "Cloudflare DNS configured (Proxied: False)."
 
-    local node_token="Not detected automatically"
+    # 3. Run node installer & ensure our pre-seeded SSL is enforced
+    local node_token="Not detected"
     if [[ "$INSTALL_PG" =~ ^[Yy]$ ]]; then
-        log INFO "Running official PasarGuard Node installer on remote server..."
-        eval "$ssh_cmd 'sudo bash -c \"\$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)\" @ install'" || true
-        
-        # Try extracting API token from common environment / config files
+        log INFO "Executing official pg-node installer (non-interactive mode)..."
+        # We pass newline to safely exit interactive SAN prompts without getting stuck
+        eval "$ssh_cmd 'printf \"\\n\\n\" | sudo bash -c \"\$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)\" @ install || true'"
+
+        # Force-overwrite with our real Wildcard certs in case pg-node script generated self-signed
+        log INFO "Enforcing official Wildcard SSL certificates over self-signed certs..."
+        cat "$cert_src" | eval "$ssh_cmd 'cat > /var/lib/pg-node/certs/ssl_cert.pem && cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pasarguard/ssl/cert.pem'"
+        cat "$key_src" | eval "$ssh_cmd 'cat > /var/lib/pg-node/certs/ssl_key.pem && cat > /var/lib/pasarguard/ssl/key.pem && chmod 600 /var/lib/pg-node/certs/ssl_key.pem /var/lib/pasarguard/ssl/key.pem'"
+
+        # Restart docker container to load the genuine Wildcard SSL immediately
+        eval "$ssh_cmd 'cd /opt/pg-node && docker compose restart 2>/dev/null || docker restart node 2>/dev/null || true'"
+
+        # Extract API token from /opt/pg-node/.env or docker logs
         local token_candidate
-        token_candidate=$(eval "$ssh_cmd 'grep -rhoE \"[a-zA-Z0-9_-]{20,}\" /var/lib/pasarguard/ /etc/pasarguard/ /opt/pasarguard/ 2>/dev/null | head -n 1'" || true)
+        token_candidate=$(eval "$ssh_cmd 'grep -iE \"API_KEY|KEY|TOKEN\" /opt/pg-node/.env 2>/dev/null | cut -d\"=\" -f2 | tr -d \" \\r\\n\"'" || true)
         if [ -n "$token_candidate" ]; then
             node_token="$token_candidate"
         fi
@@ -260,8 +271,8 @@ deploy_new_node() {
           "service_port": $sport,
           "api_port": $aport,
           "api_token": $tok,
-          "ssl_cert_path": "/var/lib/pasarguard/ssl/cert.pem",
-          "ssl_key_path": "/var/lib/pasarguard/ssl/key.pem",
+          "ssl_cert_path": "/var/lib/pg-node/certs/ssl_cert.pem",
+          "ssl_key_path": "/var/lib/pg-node/certs/ssl_key.pem",
           "deployed_at": (now | todate)
        }]' "$NODES_FILE" > "$tmp_node" && mv "$tmp_node" "$NODES_FILE"
 
@@ -272,13 +283,13 @@ deploy_new_node() {
     echo -e "  ${COLOR_BOLD}Address:${COLOR_RESET}       $full_hostname"
     echo -e "  ${COLOR_BOLD}Service Port:${COLOR_RESET}  $SERVICE_PORT"
     echo -e "  ${COLOR_BOLD}API Port:${COLOR_RESET}      $API_PORT"
-    echo -e "  ${COLOR_BOLD}Cert Path:${COLOR_RESET}     /var/lib/pasarguard/ssl/cert.pem"
-    echo -e "  ${COLOR_BOLD}Key Path:${COLOR_RESET}      /var/lib/pasarguard/ssl/key.pem"
-    if [ "$node_token" != "Not detected automatically" ]; then
+    echo -e "  ${COLOR_BOLD}Cert Path:${COLOR_RESET}     /var/lib/pg-node/certs/ssl_cert.pem (or /var/lib/pasarguard/ssl/cert.pem)"
+    echo -e "  ${COLOR_BOLD}Key Path:${COLOR_RESET}      /var/lib/pg-node/certs/ssl_key.pem  (or /var/lib/pasarguard/ssl/key.pem)"
+    if [ "$node_token" != "Not detected" ]; then
         echo -e "  ${COLOR_BOLD}API Token:${COLOR_RESET}     ${COLOR_YELLOW}$node_token${COLOR_RESET}"
     fi
     echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
-    echo -e "${COLOR_BOLD}Public Certificate Content (Copy for Panel if required):${COLOR_RESET}"
+    echo -e "${COLOR_BOLD}Public Certificate (Copy for Master Panel):${COLOR_RESET}"
     echo -e "${COLOR_YELLOW}$cert_content${COLOR_RESET}"
     echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}\n"
 }
@@ -311,22 +322,28 @@ manage_saved_nodes() {
     echo -e "\nActions for node ($target_ip):"
     echo "  1) View Public SSL Certificate Content"
     echo "  2) Restart PasarGuard Node Container / Service"
-    echo "  3) Update Node Software Core"
+    echo "  3) Re-sync Wildcard SSL (Overwrites any self-signed cert)"
     echo "  4) Delete Node from Local Inventory"
     echo "  5) Cancel"
     read -rp "Action [1-5]: " N_ACT
 
     case "$N_ACT" in
         1)
-            eval "$ssh_cmd 'cat /var/lib/pasarguard/ssl/cert.pem'" || log ERROR "Failed to read cert."
+            eval "$ssh_cmd 'cat /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || cat /var/lib/pasarguard/ssl/cert.pem'" || log ERROR "Failed to read cert."
             ;;
         2)
-            eval "$ssh_cmd 'pg-node restart 2>/dev/null || docker restart \$(docker ps -q --filter ancestor=pasarguard/node) 2>/dev/null || true'"
+            eval "$ssh_cmd 'cd /opt/pg-node && docker compose restart 2>/dev/null || docker restart node 2>/dev/null || true'"
             log OK "Restart command dispatched."
             ;;
         3)
-            eval "$ssh_cmd 'sudo bash -c \"\$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)\" @ install || true'"
-            log OK "Update script dispatched."
+            local bdom
+            bdom=$(jq -r ".[$((N_IDX - 1))].base_domain" "$NODES_FILE")
+            local c_src="/etc/letsencrypt/live/$bdom/fullchain.pem"
+            local k_src="/etc/letsencrypt/live/$bdom/privkey.pem"
+            cat "$c_src" | eval "$ssh_cmd 'cat > /var/lib/pg-node/certs/ssl_cert.pem && cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pasarguard/ssl/cert.pem'"
+            cat "$k_src" | eval "$ssh_cmd 'cat > /var/lib/pg-node/certs/ssl_key.pem && cat > /var/lib/pasarguard/ssl/key.pem && chmod 600 /var/lib/pg-node/certs/ssl_key.pem /var/lib/pasarguard/ssl/key.pem'"
+            eval "$ssh_cmd 'cd /opt/pg-node && docker compose restart 2>/dev/null || docker restart node 2>/dev/null || true'"
+            log OK "Wildcard SSL re-synced and service restarted."
             ;;
         4)
             local tmp_d
@@ -359,12 +376,12 @@ renew_sync_all_ssl() {
         local key="/etc/letsencrypt/live/$dom/privkey.pem"
 
         if [ -f "$cert" ] && [ -f "$key" ]; then
-            log INFO "Syncing renewed SSL to Master /var/lib/pasarguard/ssl/ ..."
-            sudo mkdir -p /var/lib/pasarguard/ssl
+            log INFO "Syncing renewed SSL to Master..."
+            sudo mkdir -p /var/lib/pasarguard/ssl /var/lib/pg-node/certs
             sudo cat "$cert" | sudo tee /var/lib/pasarguard/ssl/cert.pem >/dev/null
             sudo cat "$key" | sudo tee /var/lib/pasarguard/ssl/key.pem >/dev/null
-            sudo chmod 644 /var/lib/pasarguard/ssl/cert.pem
-            sudo chmod 600 /var/lib/pasarguard/ssl/key.pem
+            sudo cp /var/lib/pasarguard/ssl/cert.pem /var/lib/pg-node/certs/ssl_cert.pem
+            sudo cp /var/lib/pasarguard/ssl/key.pem /var/lib/pg-node/certs/ssl_key.pem
 
             local node_count
             node_count=$(jq '. | length' "$NODES_FILE")
@@ -379,9 +396,9 @@ renew_sync_all_ssl() {
 
                     log INFO "Pushing updated certs to node ($nip)..."
                     local sc="sshpass -p '$npass' ssh -p $nport -o StrictHostKeyChecking=no $nuser@$nip"
-                    cat "$cert" | eval "$sc 'cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pasarguard/ssl/cert.pem'"
-                    cat "$key" | eval "$sc 'cat > /var/lib/pasarguard/ssl/key.pem && chmod 600 /var/lib/pasarguard/ssl/key.pem'"
-                    eval "$sc 'pg-node restart 2>/dev/null || docker restart \$(docker ps -q --filter ancestor=pasarguard/node) 2>/dev/null || true'"
+                    cat "$cert" | eval "$sc 'cat > /var/lib/pg-node/certs/ssl_cert.pem && cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pasarguard/ssl/cert.pem'"
+                    cat "$key" | eval "$sc 'cat > /var/lib/pg-node/certs/ssl_key.pem && cat > /var/lib/pasarguard/ssl/key.pem && chmod 600 /var/lib/pg-node/certs/ssl_key.pem /var/lib/pasarguard/ssl/key.pem'"
+                    eval "$sc 'cd /opt/pg-node && docker compose restart 2>/dev/null || docker restart node 2>/dev/null || true'"
                 fi
             done
         fi
@@ -397,10 +414,10 @@ while true; do
     echo -e "\n${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
     echo -e "${COLOR_CYAN}${COLOR_BOLD}|                PASARGUARD MULTI-NODE AUTO-DEPLOYER                 |${COLOR_RESET}"
     echo -e "${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
-    echo -e "  [1] Deploy New Node (BBR, Firewall, SSL to /var/lib/pasarguard/ssl)"
+    echo -e "  [1] Deploy New Node (Auto SSL Injection & Zero Self-Signed)"
     echo -e "  [2] Issue Wildcard SSL Certificate (Let's Encrypt + Cloudflare)"
     echo -e "  [3] Sync SSL to Local Master Server"
-    echo -e "  [4] Manage Saved Nodes (Inspect, Restart, Update)"
+    echo -e "  [4] Manage Saved Nodes (Inspect, Restart, Re-sync SSL)"
     echo -e "  [5] Domain Profiles Manager"
     echo -e "  [6] Renew & Synchronize All SSLs"
     echo -e "  [7] View Execution Logs"
@@ -412,16 +429,18 @@ while true; do
         1) deploy_new_node ;;
         2) issue_wildcard_ssl ;;
         3) 
-           echo -e "\nSyncing to /var/lib/pasarguard/ssl/ on Master..."
+           echo -e "\nSyncing to Master SSL directories..."
            list_domain_profiles && {
                read -rp "Select Domain Index: " D_IDX
                D_SEL=$(jq -r ".[$((D_IDX - 1))].domain" "$DOMAINS_FILE")
-               sudo mkdir -p /var/lib/pasarguard/ssl
+               sudo mkdir -p /var/lib/pasarguard/ssl /var/lib/pg-node/certs
                sudo cat "/etc/letsencrypt/live/$D_SEL/fullchain.pem" | sudo tee /var/lib/pasarguard/ssl/cert.pem >/dev/null
                sudo cat "/etc/letsencrypt/live/$D_SEL/privkey.pem" | sudo tee /var/lib/pasarguard/ssl/key.pem >/dev/null
-               sudo chmod 644 /var/lib/pasarguard/ssl/cert.pem
-               sudo chmod 600 /var/lib/pasarguard/ssl/key.pem
-               log OK "Master SSL synced to /var/lib/pasarguard/ssl/"
+               sudo cp /var/lib/pasarguard/ssl/cert.pem /var/lib/pg-node/certs/ssl_cert.pem
+               sudo cp /var/lib/pasarguard/ssl/key.pem /var/lib/pg-node/certs/ssl_key.pem
+               sudo chmod 644 /var/lib/pasarguard/ssl/cert.pem /var/lib/pg-node/certs/ssl_cert.pem
+               sudo chmod 600 /var/lib/pasarguard/ssl/key.pem /var/lib/pg-node/certs/ssl_key.pem
+               log OK "Master SSL synced successfully."
            }
            ;;
         4) manage_saved_nodes ;;
