@@ -283,8 +283,8 @@ deploy_new_node() {
     echo -e "  ${COLOR_BOLD}Address:${COLOR_RESET}       $full_hostname"
     echo -e "  ${COLOR_BOLD}Service Port:${COLOR_RESET}  $SERVICE_PORT"
     echo -e "  ${COLOR_BOLD}API Port:${COLOR_RESET}      $API_PORT"
-    echo -e "  ${COLOR_BOLD}Cert Path:${COLOR_RESET}     /var/lib/pg-node/certs/ssl_cert.pem (or /var/lib/pasarguard/ssl/cert.pem)"
-    echo -e "  ${COLOR_BOLD}Key Path:${COLOR_RESET}      /var/lib/pg-node/certs/ssl_key.pem  (or /var/lib/pasarguard/ssl/key.pem)"
+    echo -e "  ${COLOR_BOLD}Cert Path:${COLOR_RESET}     /var/lib/pg-node/certs/ssl_cert.pem "
+    echo -e "  ${COLOR_BOLD}Key Path:${COLOR_RESET}      /var/lib/pg-node/certs/ssl_key.pem  "
     if [ "$node_token" != "Not detected" ]; then
         echo -e "  ${COLOR_BOLD}API Token:${COLOR_RESET}     ${COLOR_YELLOW}$node_token${COLOR_RESET}"
     fi
