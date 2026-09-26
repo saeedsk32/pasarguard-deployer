@@ -2,8 +2,7 @@
 
 # ==============================================================================
 # PasarGuard Multi-Node Auto-Deployer
-# Pre-injects official Wildcard SSL & integrates natively with pg-node CLI
-# Supports: Dynamic IP Migration, IPv4/IPv6, Clean IPs, Multi-SSL & Templates
+# Modular Architecture: Nodes | Domains & SSL | Cloudflare DNS Center | Logs
 # ==============================================================================
 
 set -o pipefail
@@ -83,9 +82,7 @@ upsert_cloudflare_dns() {
     local comment_text="$5"
 
     local rec_type="A"
-    if [[ "$ip_address" == *:* ]]; then
-        rec_type="AAAA"
-    fi
+    [[ "$ip_address" == *:* ]] && rec_type="AAAA"
 
     local query_res rec_id
     query_res=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?name=$record_name&type=$rec_type" \
@@ -108,7 +105,7 @@ upsert_cloudflare_dns() {
              --data "{\"type\":\"$rec_type\",\"name\":\"$record_name\",\"content\":\"$ip_address\",\"ttl\":1,\"proxied\":false,\"comment\":\"$comment_text\"}")
 
         if echo "$post_res" | jq -e '.success' >/dev/null 2>&1; then
-            log OK "Created DNS: $record_name ($rec_type: $ip_address) | $comment_text"
+            log OK "Created DNS: $record_name ($rec_type: $ip_address)"
         else
             local err_msg
             err_msg=$(echo "$post_res" | jq -r '.errors[0].message // "Unknown error"')
@@ -117,67 +114,14 @@ upsert_cloudflare_dns() {
     fi
 }
 
-issue_wildcard_ssl() {
-    echo -e "\n${COLOR_BOLD}${COLOR_CYAN}--- Issue Wildcard SSL: Let's Encrypt + Cloudflare ---${COLOR_RESET}"
-    read -rp "Enter Base Domain (e.g. example.com): " DOMAIN
-    DOMAIN=$(echo "$DOMAIN" | tr '[:upper:]' '[:lower:]' | xargs)
-
-    read -rp "Enter Cloudflare API Token: " CF_TOKEN
-    CF_TOKEN=$(echo "$CF_TOKEN" | xargs)
-
-    read -rp "Enter Cloudflare Zone ID: " ZONE_ID
-    ZONE_ID=$(echo "$ZONE_ID" | xargs)
-
-    read -rp "Enter Contact Email (Press Enter for admin@$DOMAIN): " CONTACT_EMAIL
-    CONTACT_EMAIL=${CONTACT_EMAIL:-"admin@$DOMAIN"}
-
-    if [ -z "$DOMAIN" ] || [ -z "$CF_TOKEN" ] || [ -z "$ZONE_ID" ]; then
-        log ERROR "Domain, API Token, and Zone ID cannot be empty."
-        return 1
-    fi
-
-    local cf_cred_dir="/root/.secrets/certbot"
-    local cf_cred_file="$cf_cred_dir/cloudflare_$DOMAIN.ini"
-    sudo mkdir -p "$cf_cred_dir"
-    sudo chmod 700 "$cf_cred_dir"
-
-    echo "dns_cloudflare_api_token = $CF_TOKEN" | sudo tee "$cf_cred_file" >/dev/null
-    sudo chmod 600 "$cf_cred_file"
-
-    log INFO "Requesting Wildcard SSL for $DOMAIN and *.$DOMAIN..."
-    if sudo certbot certonly \
-        --dns-cloudflare \
-        --dns-cloudflare-credentials "$cf_cred_file" \
-        --dns-cloudflare-propagation-seconds 30 \
-        -d "$DOMAIN" -d "*.$DOMAIN" \
-        --non-interactive --agree-tos -m "$CONTACT_EMAIL"; then
-        
-        log OK "Wildcard SSL certificate successfully generated."
-
-        sudo mkdir -p "/var/lib/pasarguard/ssl" "/var/lib/pasarguard/certs" "/var/lib/pg-node/certs"
-        local base_prefix="${DOMAIN%%.*}"
-        sudo cat "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" | sudo tee "/var/lib/pasarguard/ssl/cert.pem" "/var/lib/pasarguard/certs/$base_prefix.cer" "/var/lib/pasarguard/certs/cert.pem" "/var/lib/pg-node/certs/ssl_cert.pem" >/dev/null
-        sudo cat "/etc/letsencrypt/live/$DOMAIN/privkey.pem" | sudo tee "/var/lib/pasarguard/ssl/key.pem" "/var/lib/pasarguard/certs/$base_prefix.key" "/var/lib/pasarguard/certs/key.pem" "/var/lib/pg-node/certs/ssl_key.pem" >/dev/null
-        sudo chmod 644 "/var/lib/pasarguard/ssl/cert.pem" "/var/lib/pasarguard/certs/"* /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || true
-        sudo chmod 600 "/var/lib/pasarguard/ssl/key.pem" "/var/lib/pasarguard/certs/"*.key /var/lib/pg-node/certs/ssl_key.pem 2>/dev/null || true
-        log OK "Master SSL synced to: /var/lib/pasarguard/certs/ and /var/lib/pg-node/certs/"
-
-        local tmp_file
-        tmp_file=$(mktemp)
-        jq --arg dom "$DOMAIN" --arg tok "$CF_TOKEN" --arg zid "$ZONE_ID" --arg eml "$CONTACT_EMAIL" \
-           'map(select(.domain != $dom)) + [{"domain": $dom, "token": $tok, "zone_id": $zid, "email": $eml, "updated_at": (now | todate)}]' \
-           "$DOMAINS_FILE" > "$tmp_file" && mv "$tmp_file" "$DOMAINS_FILE"
-        log OK "Domain profile saved."
-    else
-        log ERROR "Certbot failed to generate Wildcard SSL."
-        return 1
-    fi
-}
+# ==============================================================================
+# SECTION 1: NODE MANAGEMENT
+# ==============================================================================
 
 deploy_new_node() {
     echo -e "\n${COLOR_BOLD}${COLOR_CYAN}--- Deploy New PasarGuard Node ---${COLOR_RESET}"
     if ! list_domain_profiles; then
-        echo -e "${COLOR_YELLOW}Please add a domain profile first (Option 2).${COLOR_RESET}"
+        echo -e "${COLOR_YELLOW}Please add a domain profile first in Domain & SSL Manager.${COLOR_RESET}"
         return 1
     fi
 
@@ -319,7 +263,6 @@ REMOTE_INIT
     cat "$key_src" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat > /tmp/node_ssl/key.pem && chmod 600 /tmp/node_ssl/key.pem"
     log OK "Main Wildcard SSL uploaded successfully."
 
-    # Multi-Domain SSL Transfer
     local installed_ssl_domains=("$selected_domain")
     if [ -n "$EXTRA_DOM_IDXS" ]; then
         IFS=',' read -ra EXTRA_DOM_ARR <<< "$EXTRA_DOM_IDXS"
@@ -344,7 +287,6 @@ REMOTE_INIT
         done
     fi
 
-    # Create Primary Node DNS Records with Comments
     local node_comment="PG-Node: $NODE_NAME | Main-IPv4"
     upsert_cloudflare_dns "$selected_zone" "$selected_token" "$full_hostname" "$NODE_IP" "$node_comment"
     
@@ -372,7 +314,9 @@ REMOTE_INIT
         done
     fi
 
-    local created_dns_list=("$full_hostname")
+    local created_dns_list=("$full_hostname ($NODE_IP)")
+    [ -n "$NODE_IPV6" ] && created_dns_list+=("$full_hostname ($NODE_IPV6)")
+
     local ip_pool_idx=0
     for sub_item in "${all_extra_subs[@]}"; do
         if [ -n "$sub_item" ]; then
@@ -382,7 +326,7 @@ REMOTE_INIT
             local extra_full_sub="$sub_item.$selected_domain"
             local sub_comment="PG-Node: $NODE_NAME | Subdomain: $sub_item"
             upsert_cloudflare_dns "$selected_zone" "$selected_token" "$extra_full_sub" "$target_sub_ip" "$sub_comment"
-            created_dns_list+=("$extra_full_sub")
+            created_dns_list+=("$extra_full_sub ($target_sub_ip)")
         fi
     done
 
@@ -489,10 +433,7 @@ migrate_node_ip() {
     echo -e "Current Registered IP: ${COLOR_RED}$old_ip${COLOR_RESET}"
     read -rp "Enter NEW Server IPv4: " NEW_IP
     NEW_IP=$(echo "$NEW_IP" | tr -d ' ')
-    if [ -z "$NEW_IP" ]; then
-        log ERROR "New IP cannot be empty."
-        return 1
-    fi
+    [ -z "$NEW_IP" ] && { log ERROR "New IP cannot be empty."; return 1; }
 
     read -rp "Keep current SSH Password? [Y/n]: " KEEP_PASS
     KEEP_PASS=${KEEP_PASS:-Y}
@@ -503,7 +444,7 @@ migrate_node_ip() {
 
     log INFO "Validating SSH connectivity on new IP: $NEW_IP:$target_port..."
     if ! sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$target_user@$NEW_IP" "echo connected" >/dev/null 2>&1; then
-        log ERROR "Cannot connect to new IP via SSH. Please check IP and credentials."
+        log ERROR "Cannot connect to new IP via SSH."
         return 1
     fi
     log OK "SSH connection confirmed on new IP."
@@ -514,7 +455,6 @@ migrate_node_ip() {
 
     if [ -n "$c_tok" ] && [ -n "$c_zid" ]; then
         log INFO "Migrating Cloudflare DNS records from $old_ip to $NEW_IP..."
-        
         while IFS= read -r dns_name; do
             [ -z "$dns_name" ] && continue
             local clean_name
@@ -542,178 +482,6 @@ migrate_node_ip() {
        '.[($idx|tonumber)].ip = $nip | .[($idx|tonumber)].ssh_pass = $pwd' "$NODES_FILE" > "$tmp_mig" && mv "$tmp_mig" "$NODES_FILE"
 
     log OK "Node IP migration completed successfully!"
-    echo -e "\n${COLOR_GREEN}${COLOR_BOLD}✓ Node $target_host is now pointed to new IP: $NEW_IP${COLOR_RESET}"
-    echo -e "${COLOR_YELLOW}Note: No settings need to be changed in PasarGuard Panel because the Panel connects via domain ($target_addr) which now resolves to the new IP!${COLOR_RESET}\n"
-}
-
-manage_dns_presets() {
-    while true; do
-        echo -e "\n${COLOR_CYAN}${COLOR_BOLD}--- DNS Subdomain Presets Manager ---${COLOR_RESET}"
-        jq -r 'to_entries[] | "  [" + .key + "]: " + (.value | join(", "))' "$PRESETS_FILE"
-        echo ""
-        echo "  1) Add / Update Preset"
-        echo "  2) Delete Preset"
-        echo "  3) Return to Main Menu"
-        read -rp "Select Option [1-3]: " PR_OPT
-
-        case "$PR_OPT" in
-            1)
-                read -rp "Enter Preset Name (e.g. standard / gaming / cdn): " PNAME
-                PNAME=$(echo "$PNAME" | tr ' ' '_')
-                read -rp "Enter subdomains (comma-separated, e.g. sub1, cdn, direct, vpn): " PSUBS
-                if [ -n "$PNAME" ] && [ -n "$PSUBS" ]; then
-                    local subs_json
-                    subs_json=$(echo "$PSUBS" | tr ',' '\n' | sed 's/^[ \t]*//;s/[ \t]*$//' | grep -v '^$' | jq -R . | jq -s .)
-                    local tmp_pr
-                    tmp_pr=$(mktemp)
-                    jq --arg k "$PNAME" --argjson v "$subs_json" '.[$k] = $v' "$PRESETS_FILE" > "$tmp_pr" && mv "$tmp_pr" "$PRESETS_FILE"
-                    log OK "Preset '$PNAME' saved successfully."
-                fi
-                ;;
-            2)
-                read -rp "Enter Preset Name to delete: " PNAME_DEL
-                local tmp_del
-                tmp_del=$(mktemp)
-                jq --arg k "$PNAME_DEL" 'del(.[$k])' "$PRESETS_FILE" > "$tmp_del" && mv "$tmp_del" "$PRESETS_FILE"
-                log OK "Preset '$PNAME_DEL' deleted."
-                ;;
-            3)
-                break
-                ;;
-        esac
-    done
-}
-
-manage_clean_ips() {
-    while true; do
-        echo -e "\n${COLOR_CYAN}${COLOR_BOLD}--- Cloudflare Clean IPs Manager (Round-Robin & Pruning) ---${COLOR_RESET}"
-        if ! list_domain_profiles; then
-            break
-        fi
-        local d_count
-        d_count=$(get_domains_count)
-
-        echo ""
-        echo "  1) Add Multiple Clean IPs to a Single Subdomain (Round-Robin DNS)"
-        echo "  2) List All Clean IP Records from Cloudflare"
-        echo "  3) Selectively Delete Clean IP Records (by Subdomain or Tag)"
-        echo "  4) Return to Main Menu"
-        read -rp "Select Option [1-4]: " CL_OPT
-
-        case "$CL_OPT" in
-            1)
-                read -rp "Select Target Domain Profile [1-$d_count]: " C_DOM_IDX
-                local c_dom c_tok c_zid
-                c_dom=$(jq -r ".[$((C_DOM_IDX - 1))].domain" "$DOMAINS_FILE")
-                c_tok=$(jq -r ".[$((C_DOM_IDX - 1))].token" "$DOMAINS_FILE")
-                c_zid=$(jq -r ".[$((C_DOM_IDX - 1))].zone_id" "$DOMAINS_FILE")
-
-                echo -e "\n${COLOR_YELLOW}Enter the exact subdomain to attach all Clean IPs to (Round-Robin):${COLOR_RESET}"
-                echo -e "Example: '${COLOR_BOLD}cdn${COLOR_RESET}' will create multiple A records for '${COLOR_BOLD}cdn.$c_dom${COLOR_RESET}'"
-                read -rp "Subdomain prefix [cdn]: " PREFIX
-                PREFIX=${PREFIX:-"cdn"}
-                local full_target_sub="$PREFIX.$c_dom"
-
-                read -rp "Operator / ISP Label for Comments (e.g. MCI / MTN / Irancell): " ISP_LABEL
-                ISP_LABEL=${ISP_LABEL:-"Clean IP"}
-
-                echo -e "\n${COLOR_YELLOW}Paste multiple Clean IPs (comma-separated or space-separated):${COLOR_RESET}"
-                read -rp "IPs: " RAW_IPS
-
-                # تبدیل جداکننده‌ها به یک لیست استاندارد
-                local clean_ip_arr=($(echo "$RAW_IPS" | tr ',' ' ' | tr '\n' ' '))
-                local count_added=0
-
-                for cip in "${clean_ip_arr[@]}"; do
-                    cip=$(echo "$cip" | tr -d ' \r\n')
-                    if [[ "$cip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$cip" == *:* ]]; then
-                        local c_comment="PG-CleanIP: $ISP_LABEL | Added $(date '+%Y-%m-%d')"
-                        upsert_cloudflare_dns "$c_zid" "$c_tok" "$full_target_sub" "$cip" "$c_comment"
-                        count_added=$((count_added + 1))
-                    fi
-                done
-                log OK "Successfully attached $count_added clean IPs to $full_target_sub"
-                ;;
-
-            2)
-                read -rp "Select Domain Profile [1-$d_count]: " C_DOM_IDX
-                local c_dom c_tok c_zid
-                c_dom=$(jq -r ".[$((C_DOM_IDX - 1))].domain" "$DOMAINS_FILE")
-                c_tok=$(jq -r ".[$((C_DOM_IDX - 1))].token" "$DOMAINS_FILE")
-                c_zid=$(jq -r ".[$((C_DOM_IDX - 1))].zone_id" "$DOMAINS_FILE")
-
-                log INFO "Fetching Clean IP records from Cloudflare for $c_dom..."
-                local all_recs
-                all_recs=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?per_page=100" \
-                     -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json")
-
-                echo -e "\n${COLOR_CYAN}Current Clean IP Records (Tagged with PG-CleanIP):${COLOR_RESET}"
-                echo -e "--------------------------------------------------------------------------------"
-                echo "$all_recs" | jq -r '.result[]? | select(.comment != null and (.comment | contains("PG-CleanIP"))) | "ID: " + .id + " | " + .name + " (" + .type + ") -> " + .content + " | Comment: " + .comment'
-                echo -e "--------------------------------------------------------------------------------"
-                ;;
-
-            3)
-                read -rp "Select Domain Profile [1-$d_count]: " C_DOM_IDX
-                local c_dom c_tok c_zid
-                c_dom=$(jq -r ".[$((C_DOM_IDX - 1))].domain" "$DOMAINS_FILE")
-                c_tok=$(jq -r ".[$((C_DOM_IDX - 1))].token" "$DOMAINS_FILE")
-                c_zid=$(jq -r ".[$((C_DOM_IDX - 1))].zone_id" "$DOMAINS_FILE")
-
-                echo "  1) Delete by Exact Subdomain (e.g. remove all IPs under cdn.$c_dom)"
-                echo "  2) Delete a Specific IP address"
-                echo "  3) Cancel"
-                read -rp "Selection [1-3]: " DEL_WAY
-
-                if [ "$DEL_WAY" == "1" ]; then
-                    read -rp "Enter subdomain name to purge (e.g. cdn or cdn.$c_dom): " PURGE_SUB
-                    if [[ "$PURGE_SUB" != *"$c_dom"* ]]; then
-                        PURGE_SUB="$PURGE_SUB.$c_dom"
-                    fi
-
-                    log INFO "Searching records for $PURGE_SUB..."
-                    local query_del
-                    query_del=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?name=$PURGE_SUB" \
-                         -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json")
-
-                    local ids_to_del=($(echo "$query_del" | jq -r '.result[]?.id'))
-                    if [ ${#ids_to_del[@]} -eq 0 ]; then
-                        echo -e "${COLOR_YELLOW}No records found for $PURGE_SUB.${COLOR_RESET}"
-                    else
-                        echo -e "Found ${COLOR_RED}${#ids_to_del[@]}${COLOR_RESET} records for $PURGE_SUB. Deleting..."
-                        for did in "${ids_to_del[@]}"; do
-                            curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records/$did" \
-                                 -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" >/dev/null
-                        done
-                        log OK "All records under $PURGE_SUB purged."
-                    fi
-
-                elif [ "$DEL_WAY" == "2" ]; then
-                    read -rp "Enter specific IP to delete from Cloudflare: " PURGE_IP
-                    PURGE_IP=$(echo "$PURGE_IP" | tr -d ' ')
-                    local query_del
-                    query_del=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?content=$PURGE_IP" \
-                         -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json")
-
-                    local ids_to_del=($(echo "$query_del" | jq -r '.result[]?.id'))
-                    if [ ${#ids_to_del[@]} -eq 0 ]; then
-                        echo -e "${COLOR_YELLOW}No records found pointing to $PURGE_IP.${COLOR_RESET}"
-                    else
-                        echo -e "Deleting records matching $PURGE_IP..."
-                        for did in "${ids_to_del[@]}"; do
-                            curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records/$did" \
-                                 -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" >/dev/null
-                        done
-                        log OK "Deleted all records matching $PURGE_IP."
-                    fi
-                fi
-                ;;
-
-            4)
-                break
-                ;;
-        esac
-    done
 }
 
 manage_saved_nodes() {
@@ -759,22 +527,22 @@ manage_saved_nodes() {
         fi
     fi
 
-    echo -e "\nActions for node: $target_host - $target_ip"
-    echo "  1) View Panel Connection Info (Address, Ports, Token and Full Card)"
-    echo -e "  2) ${COLOR_GREEN}${COLOR_BOLD}Migrate / Change Server IP Address (Auto-update DNS & SSH)${COLOR_RESET}"
-    echo "  3) Manage & Sync Multi-Domain SSLs (View/Inject Domain Certificates)"
-    echo "  4) Add Cloudflare DNS Record with Label Comment"
-    echo "  5) Switch Node Protocol (gRPC <-> REST)"
-    echo "  6) Manage Systemd Service (Install / Remove pg-node-service)"
-    echo "  7) Update / Change Xray-core (pg-node core-update)"
+    echo -e "\nActions for node: ${COLOR_BOLD}$target_host ($target_ip)${COLOR_RESET}"
+    echo "  1) View Panel Connection Info (Address, Ports, Token & Full Card)"
+    echo -e "  2) ${COLOR_GREEN}${COLOR_BOLD}Migrate / Change Server IP (1-Click Auto DNS & Config Update)${COLOR_RESET}"
+    echo "  3) Manage & Sync Multi-Domain SSLs (Inject Domain Certs)"
+    echo "  4) Add Extra Cloudflare DNS Record with Label"
+    echo "  5) Switch Protocol (gRPC <-> REST)"
+    echo "  6) Manage Systemd Service (Install / Uninstall)"
+    echo "  7) Update / Change Xray-core"
     echo "  8) Update PasarGuard Node Software (pg-node update)"
-    echo "  9) Download / Update GeoFiles (pg-node geofiles)"
-    echo "  10) Restart PasarGuard Node (pg-node restart)"
+    echo "  9) Download / Update GeoFiles (GeoIP & GeoSite)"
+    echo "  10) Restart Node Service"
     echo "  11) View Live Node Logs (pg-node logs)"
     echo "  12) Delete Node from Local Inventory Only"
     echo "  13) Completely Uninstall Node from Server, Cloudflare & Inventory"
-    echo "  14) Cancel"
-    read -rp "Action [1-14]: " N_ACT
+    echo "  0) Back"
+    read -rp "Action [0-13]: " N_ACT
 
     case "$N_ACT" in
         1)
@@ -802,7 +570,7 @@ manage_saved_nodes() {
                 if [ "$sdom" == "$target_bdom" ]; then
                     echo -e "  ${COLOR_GREEN}• $sdom${COLOR_RESET} (Default: /var/lib/pg-node/certs/ssl_cert.pem)"
                 else
-                    echo -e "  ${COLOR_GREEN}• $sdom${COLOR_RESET} (Custom Inbounds: /var/lib/pg-node/certs/$sdom/fullchain.pem)"
+                    echo -e "  ${COLOR_GREEN}• $sdom${COLOR_RESET} (Custom: /var/lib/pg-node/certs/$sdom/fullchain.pem)"
                 fi
             done
             echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
@@ -810,9 +578,7 @@ manage_saved_nodes() {
             echo -e "${COLOR_YELLOW}$single_cert${COLOR_RESET}"
             echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}\n"
             ;;
-        2)
-            migrate_node_ip "$((N_IDX - 1))"
-            ;;
+        2) migrate_node_ip "$((N_IDX - 1))" ;;
         3)
             echo -e "\n${COLOR_CYAN}--- Manage & Sync Multi-Domain SSLs ---${COLOR_RESET}"
             list_domain_profiles
@@ -836,13 +602,10 @@ manage_saved_nodes() {
                        '.[($idx|tonumber)].ssl_domains = ((.[($idx|tonumber)].ssl_domains // []) + [$ndom] | unique)' \
                        "$NODES_FILE" > "$tmp_mupd" && mv "$tmp_mupd" "$NODES_FILE"
                     log OK "SSL for $inj_dom injected at /var/lib/pg-node/certs/$inj_dom/"
-                else
-                    log ERROR "Certificate files for $inj_dom not found on Master."
                 fi
             fi
             ;;
         4)
-            echo -e "\n${COLOR_CYAN}--- Add Additional Cloudflare Subdomain DNS ---${COLOR_RESET}"
             read -rp "Enter new subdomain prefix (e.g. proxy2): " NEW_SUB
             NEW_SUB=$(echo "$NEW_SUB" | tr -d ' ')
             read -rp "Target IP [Default: $target_ip]: " CHOSEN_IP
@@ -854,7 +617,7 @@ manage_saved_nodes() {
                 c_tok=$(jq -r --arg bd "$target_bdom" '.[] | select(.domain == $bd) | .token' "$DOMAINS_FILE")
                 c_zid=$(jq -r --arg bd "$target_bdom" '.[] | select(.domain == $bd) | .zone_id' "$DOMAINS_FILE")
                 if [ -n "$c_tok" ] && [ -n "$c_zid" ]; then
-                    local rec_comment="PG-Node: $target_host | Custom Subdomain: $NEW_SUB"
+                    local rec_comment="PG-Node: $target_host | Custom: $NEW_SUB"
                     upsert_cloudflare_dns "$c_zid" "$c_tok" "$new_full_rec" "$CHOSEN_IP" "$rec_comment"
                     
                     local tmp_dnsup
@@ -866,118 +629,86 @@ manage_saved_nodes() {
             fi
             ;;
         5)
-            echo -e "\n${COLOR_CYAN}--- Switch Node Protocol ---${COLOR_RESET}"
-            echo "  1) Use gRPC (Official Default)"
-            echo "  2) Use REST"
+            echo "  1) Use gRPC (Default) | 2) Use REST"
             read -rp "Select Protocol [1-2]: " PROTO_SEL
-            if [ "$PROTO_SEL" == "1" ]; then
-                log INFO "Configuring node to use gRPC protocol..."
-                eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node install -y --override --use-grpc --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $target_sport --api-port $target_aport'"
-                local tmp_upd
-                tmp_upd=$(mktemp)
-                jq --arg idx "$((N_IDX - 1))" '.[($idx|tonumber)].protocol = "grpc"' "$NODES_FILE" > "$tmp_upd" && mv "$tmp_upd" "$NODES_FILE"
-                log OK "Switched to gRPC protocol."
-            elif [ "$PROTO_SEL" == "2" ]; then
-                log INFO "Configuring node to use REST protocol..."
-                eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node install -y --override --use-rest --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $target_sport --api-port $target_aport'"
-                local tmp_upd
-                tmp_upd=$(mktemp)
-                jq --arg idx "$((N_IDX - 1))" '.[($idx|tonumber)].protocol = "rest"' "$NODES_FILE" > "$tmp_upd" && mv "$tmp_upd" "$NODES_FILE"
-                log OK "Switched to REST protocol."
-            fi
+            local p_flag="--use-grpc" p_str="grpc"
+            [ "$PROTO_SEL" == "2" ] && { p_flag="--use-rest"; p_str="rest"; }
+            eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node install -y --override $p_flag --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem --service-port $target_sport --api-port $target_aport'"
+            local tmp_upd
+            tmp_upd=$(mktemp)
+            jq --arg idx "$((N_IDX - 1))" --arg ps "$p_str" '.[($idx|tonumber)].protocol = $ps' "$NODES_FILE" > "$tmp_upd" && mv "$tmp_upd" "$NODES_FILE"
+            log OK "Switched to $p_str protocol."
             ;;
         6)
-            echo -e "\n${COLOR_CYAN}--- Manage Systemd Service ---${COLOR_RESET}"
-            echo "  1) Install and Start pg-node-service (Systemd)"
-            echo "  2) Remove pg-node-service (Systemd)"
+            echo "  1) Install Service | 2) Remove Service"
             read -rp "Action [1-2]: " SYS_SEL
-            if [ "$SYS_SEL" == "1" ]; then
-                eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node service-install'"
-                log OK "Systemd service installed and started."
-            elif [ "$SYS_SEL" == "2" ]; then
-                eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node service-uninstall'"
-                log OK "Systemd service removed."
-            fi
+            [ "$SYS_SEL" == "1" ] && eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node service-install'"
+            [ "$SYS_SEL" == "2" ] && eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node service-uninstall'"
             ;;
         7)
-            echo -e "\n${COLOR_CYAN}--- Update / Change Xray-core ---${COLOR_RESET}"
-            read -rp "Enter Xray version (Press Enter for 'latest'): " X_VER
+            read -rp "Enter Xray version [latest]: " X_VER
             X_VER=${X_VER:-latest}
-            log INFO "Updating Xray-core to version: $X_VER on $target_ip..."
             eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node core-update --version $X_VER'"
-            log OK "Xray-core update dispatched."
             ;;
-        8)
-            log INFO "Updating PasarGuard Node software to latest..."
-            eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node update -y'"
-            log OK "Node updated successfully."
-            ;;
-        9)
-            log INFO "Updating GeoFiles (GeoIP and GeoSite)..."
-            eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node geofiles'"
-            log OK "GeoFiles downloaded/updated."
-            ;;
-        10)
-            log INFO "Restarting node service..."
-            eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node restart -n 2>/dev/null || true'"
-            log OK "Node service restarted."
-            ;;
-        11)
-            log INFO "Streaming Node Logs (Press Ctrl+C to return)..."
-            eval "$ssh_cmd -t 'export PATH=/usr/local/bin:\$PATH; pg-node logs'"
-            ;;
+        8) eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node update -y'" ;;
+        9) eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node geofiles'" ;;
+        10) eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node restart -n 2>/dev/null || true'"; log OK "Restarted." ;;
+        11) eval "$ssh_cmd -t 'export PATH=/usr/local/bin:\$PATH; pg-node logs'" ;;
         12)
             local tmp_d
             tmp_d=$(mktemp)
             jq "del(.[$((N_IDX - 1))])" "$NODES_FILE" > "$tmp_d" && mv "$tmp_d" "$NODES_FILE"
-            log OK "Node removed from local inventory only."
+            log OK "Node removed from local inventory."
             ;;
         13)
-            echo -e "${COLOR_RED}${COLOR_BOLD}WARNING: This will completely destroy all PasarGuard node data, remove docker containers, delete certificates on $target_ip, clean up Cloudflare DNS, and delete the node profile!${COLOR_RESET}"
-            read -rp "Are you absolutely sure? Type 'yes' to proceed: " CONFIRM_PURGE
+            echo -e "${COLOR_RED}${COLOR_BOLD}WARNING: Will wipe node software, DNS records and inventory.${COLOR_RESET}"
+            read -rp "Type 'yes' to confirm: " CONFIRM_PURGE
             if [ "$CONFIRM_PURGE" == "yes" ]; then
-                log INFO "Executing native pg-node uninstall on $target_ip..."
-                sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no "$target_user@$target_ip" bash << REMOTE_UNINSTALL
-export PATH=/usr/local/bin:\$PATH
-pg-node uninstall -y 2>/dev/null || true
-rm -rf /opt/pg-node /var/lib/pg-node /var/lib/pasarguard /usr/local/bin/pg-node /etc/sysctl.d/99-bbr.conf
-ufw delete allow $target_sport/tcp 2>/dev/null || true
-ufw delete allow $target_aport/tcp 2>/dev/null || true
-REMOTE_UNINSTALL
-                log OK "Remote server cleaned up."
-
+                eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node uninstall -y 2>/dev/null || true; rm -rf /opt/pg-node /var/lib/pg-node /var/lib/pasarguard /usr/local/bin/pg-node; ufw delete allow $target_sport/tcp 2>/dev/null || true; ufw delete allow $target_aport/tcp 2>/dev/null || true'"
                 local cf_tok cf_zid
                 cf_tok=$(jq -r --arg bd "$target_bdom" '.[] | select(.domain == $bd) | .token' "$DOMAINS_FILE")
                 cf_zid=$(jq -r --arg bd "$target_bdom" '.[] | select(.domain == $bd) | .zone_id' "$DOMAINS_FILE")
                 if [ -n "$cf_tok" ] && [ -n "$cf_zid" ]; then
-                    log INFO "Removing DNS records from Cloudflare..."
                     jq -r ".[$((N_IDX - 1))].dns_records[]? // empty" "$NODES_FILE" | while read -r r_to_del; do
                         local clean_name
                         clean_name=$(echo "$r_to_del" | awk '{print $1}')
                         local rec_id
                         rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records?name=$clean_name" \
                              -H "Authorization: Bearer $cf_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty')
-                        if [ -n "$rec_id" ]; then
-                            curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records/$rec_id" \
-                                 -H "Authorization: Bearer $cf_tok" -H "Content-Type: application/json" >/dev/null
-                            log OK "Deleted Cloudflare record: $clean_name"
-                        fi
+                        [ -n "$rec_id" ] && curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records/$rec_id" -H "Authorization: Bearer $cf_tok" -H "Content-Type: application/json" >/dev/null
                     done
                 fi
-
                 local tmp_del
                 tmp_del=$(mktemp)
                 jq "del(.[$((N_IDX - 1))])" "$NODES_FILE" > "$tmp_del" && mv "$tmp_del" "$NODES_FILE"
-                log OK "Node purged from inventory. Cleanup complete."
-            else
-                echo "Purge canceled."
+                log OK "Node completely wiped."
             fi
             ;;
-        *)
-            return 0
-            ;;
+        *) return 0 ;;
     esac
 }
+
+node_management_menu() {
+    while true; do
+        echo -e "\n${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
+        echo -e "${COLOR_CYAN}${COLOR_BOLD}|                   [1] NODE MANAGEMENT CENTER                       |${COLOR_RESET}"
+        echo -e "${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
+        echo -e "  [1] Deploy New Node (Multi-IP, Multi-SSL & Zero Error)"
+        echo -e "  [2] Manage Saved Nodes (Inspect, IP Migration, Protocol, Purge)"
+        echo -e "  [0] Back to Main Menu"
+        read -rp "Select Option [0-2]: " NM_OPT
+        case "$NM_OPT" in
+            1) deploy_new_node ;;
+            2) manage_saved_nodes ;;
+            0) break ;;
+            *) echo "Invalid option." ;;
+        esac
+    done
+}
+
+# ==============================================================================
+# SECTION 2: DOMAINS & SSL MANAGEMENT
+# ==============================================================================
 
 renew_sync_all_ssl() {
     echo -e "\n${COLOR_CYAN}--- Renew & Synchronize All SSL Certificates ---${COLOR_RESET}"
@@ -1018,7 +749,7 @@ renew_sync_all_ssl() {
                 npass=$(jq -r ".[$n].ssh_pass" "$NODES_FILE")
 
                 if [ "$nbdom" == "$dom" ]; then
-                    log INFO "Pushing primary renewed cert to node ($nip)..."
+                    log INFO "Pushing renewed cert to node ($nip)..."
                     cat "$cert" | sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no "$nuser@$nip" "cat > /var/lib/pg-node/certs/ssl_cert.pem && cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pasarguard/ssl/cert.pem"
                     cat "$key" | sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no "$nuser@$nip" "cat > /var/lib/pg-node/certs/ssl_key.pem && cat > /var/lib/pasarguard/ssl/key.pem && chmod 600 /var/lib/pg-node/certs/ssl_key.pem /var/lib/pasarguard/ssl/key.pem"
                     sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no "$nuser@$nip" "export PATH=/usr/local/bin:\$PATH; pg-node restart -n 2>/dev/null || true"
@@ -1027,7 +758,6 @@ renew_sync_all_ssl() {
                 local is_sec
                 is_sec=$(jq -r --arg d "$dom" ".[$n].ssl_domains[]? | select(. == \$d)" "$NODES_FILE")
                 if [ -n "$is_sec" ] && [ "$dom" != "$nbdom" ]; then
-                    log INFO "Updating secondary SSL for $dom on node ($nip)..."
                     cat "$cert" | sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no "$nuser@$nip" "cat > /var/lib/pg-node/certs/$dom/fullchain.pem && chmod 644 /var/lib/pg-node/certs/$dom/fullchain.pem"
                     cat "$key" | sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no "$nuser@$nip" "cat > /var/lib/pg-node/certs/$dom/privkey.pem && chmod 600 /var/lib/pg-node/certs/$dom/privkey.pem"
                 fi
@@ -1037,63 +767,300 @@ renew_sync_all_ssl() {
     log OK "1-Click Renewal & sync complete across Master and all nodes."
 }
 
-# --- Main Entry Point ---
+domain_management_menu() {
+    while true; do
+        echo -e "\n${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
+        echo -e "${COLOR_CYAN}${COLOR_BOLD}|                   [2] DOMAINS & SSL MANAGER                        |${COLOR_RESET}"
+        echo -e "${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
+        echo -e "  [1] Issue New Wildcard SSL Certificate (Let's Encrypt + Cloudflare)"
+        echo -e "  [2] Sync Existing Domain SSL to Local Master Web Panel"
+        echo -e "  [3] Renew & Synchronize All SSLs (Master + All Nodes)"
+        echo -e "  [4] List & Delete Registered Domain Profiles"
+        echo -e "  [0] Back to Main Menu"
+        read -rp "Select Option [0-4]: " DM_OPT
+        case "$DM_OPT" in
+            1) issue_wildcard_ssl ;;
+            2)
+                list_domain_profiles && {
+                    read -rp "Select Domain Index: " D_IDX
+                    D_SEL=$(jq -r ".[$((D_IDX - 1))].domain" "$DOMAINS_FILE")
+                    sudo mkdir -p /var/lib/pasarguard/ssl /var/lib/pasarguard/certs /var/lib/pg-node/certs
+                    base_name="${D_SEL%%.*}"
+                    sudo cat "/etc/letsencrypt/live/$D_SEL/fullchain.pem" | sudo tee /var/lib/pasarguard/ssl/cert.pem /var/lib/pasarguard/certs/"$base_name".cer /var/lib/pasarguard/certs/cert.pem /var/lib/pg-node/certs/ssl_cert.pem >/dev/null
+                    sudo cat "/etc/letsencrypt/live/$D_SEL/privkey.pem" | sudo tee /var/lib/pasarguard/ssl/key.pem /var/lib/pasarguard/certs/"$base_name".key /var/lib/pasarguard/certs/key.pem /var/lib/pg-node/certs/ssl_key.pem >/dev/null
+                    sudo chmod 644 /var/lib/pasarguard/ssl/cert.pem /var/lib/pasarguard/certs/*.cer /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || true
+                    sudo chmod 600 /var/lib/pasarguard/ssl/key.pem /var/lib/pasarguard/certs/*.key /var/lib/pg-node/certs/ssl_key.pem 2>/dev/null || true
+                    pasarguard restart 2>/dev/null || docker compose -f /opt/pasarguard/docker-compose.yml restart 2>/dev/null || true
+                    log OK "Master SSL synced and PasarGuard web panel restarted."
+                }
+                ;;
+            3) renew_sync_all_ssl ;;
+            4)
+                list_domain_profiles || true
+                read -rp "Enter Profile Index to Delete (or press Enter to cancel): " DEL_I
+                if [[ "$DEL_I" =~ ^[0-9]+$ ]]; then
+                    local tmp_m
+                    tmp_m=$(mktemp)
+                    jq "del(.[$((DEL_I - 1))])" "$DOMAINS_FILE" > "$tmp_m" && mv "$tmp_m" "$DOMAINS_FILE"
+                    log OK "Profile deleted."
+                fi
+                ;;
+            0) break ;;
+            *) echo "Invalid option." ;;
+        esac
+    done
+}
+
+# ==============================================================================
+# SECTION 3: CLOUDFLARE DNS CENTER (CLEAN IPS & PRESETS)
+# ==============================================================================
+
+manage_clean_ips_interactive() {
+    if ! list_domain_profiles; then return; fi
+    local d_count
+    d_count=$(get_domains_count)
+    read -rp "Select Target Domain Profile [1-$d_count]: " C_DOM_IDX
+    if ! [[ "$C_DOM_IDX" =~ ^[0-9]+$ ]] || [ "$C_DOM_IDX" -lt 1 ] || [ "$C_DOM_IDX" -gt "$d_count" ]; then
+        return
+    fi
+
+    local c_dom c_tok c_zid
+    c_dom=$(jq -r ".[$((C_DOM_IDX - 1))].domain" "$DOMAINS_FILE")
+    c_tok=$(jq -r ".[$((C_DOM_IDX - 1))].token" "$DOMAINS_FILE")
+    c_zid=$(jq -r ".[$((C_DOM_IDX - 1))].zone_id" "$DOMAINS_FILE")
+
+    while true; do
+        echo -e "\n${COLOR_CYAN}${COLOR_BOLD}=== Clean IPs Center for: $c_dom ===${COLOR_RESET}"
+        echo "  [1] Add Clean IPs to Subdomain (Round-Robin DNS)"
+        echo "  [2] Interactive Records Table (Multi-Select, Edit & Delete)"
+        echo "  [0] Back"
+        read -rp "Select Option [0-2]: " CIP_OPT
+
+        case "$CIP_OPT" in
+            1)
+                echo -e "\n${COLOR_YELLOW}Enter the exact subdomain to attach all Clean IPs to:${COLOR_RESET}"
+                echo -e "Example: '${COLOR_BOLD}cdn${COLOR_RESET}' will point multiple IPs to '${COLOR_BOLD}cdn.$c_dom${COLOR_RESET}'"
+                read -rp "Subdomain prefix [cdn]: " PREFIX
+                PREFIX=${PREFIX:-"cdn"}
+                local full_target_sub="$PREFIX.$c_dom"
+
+                read -rp "ISP / Pool Label for Comments (e.g. MCI / MTN / CleanPool): " ISP_LABEL
+                ISP_LABEL=${ISP_LABEL:-"Clean IP"}
+
+                echo -e "\n${COLOR_YELLOW}Paste Clean IPs (comma, space, or newline separated):${COLOR_RESET}"
+                read -rp "IPs: " RAW_IPS
+
+                local clean_ip_arr=($(echo "$RAW_IPS" | tr ',' ' ' | tr '\n' ' '))
+                local count_added=0
+
+                for cip in "${clean_ip_arr[@]}"; do
+                    cip=$(echo "$cip" | tr -d ' \r\n')
+                    if [[ "$cip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$cip" == *:* ]]; then
+                        local c_comment="PG-CleanIP: $ISP_LABEL | Added $(date '+%Y-%m-%d')"
+                        upsert_cloudflare_dns "$c_zid" "$c_tok" "$full_target_sub" "$cip" "$c_comment"
+                        count_added=$((count_added + 1))
+                    fi
+                done
+                log OK "Successfully attached $count_added clean IPs to $full_target_sub"
+                ;;
+
+            2)
+                log INFO "Loading Clean IP records from Cloudflare..."
+                local raw_json
+                raw_json=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?per_page=100" \
+                     -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json")
+
+                local rec_ids=() rec_names=() rec_types=() rec_ips=() rec_comments=()
+                while IFS= read -r line; do
+                    [ -z "$line" ] && continue
+                    rec_ids+=("$(echo "$line" | jq -r '.id')")
+                    rec_names+=("$(echo "$line" | jq -r '.name')")
+                    rec_types+=("$(echo "$line" | jq -r '.type')")
+                    rec_ips+=("$(echo "$line" | jq -r '.content')")
+                    rec_comments+=("$(echo "$line" | jq -r '.comment // ""')")
+                done < <(echo "$raw_json" | jq -c '.result[]? | select(.comment != null and (.comment | contains("PG-CleanIP")))')
+
+                local total_found=${#rec_ids[@]}
+                if [ "$total_found" -eq 0 ]; then
+                    echo -e "${COLOR_YELLOW}No records tagged with PG-CleanIP found on $c_dom.${COLOR_RESET}"
+                    continue
+                fi
+
+                echo -e "\n${COLOR_CYAN}${COLOR_BOLD}+----+---------------------------+-------+-----------------+----------------------------------------+${COLOR_RESET}"
+                printf "${COLOR_CYAN}${COLOR_BOLD}| %-2s | %-25s | %-5s | %-15s | %-38s |${COLOR_RESET}\n" "#" "Subdomain" "Type" "IP Address" "Comment Tag"
+                echo -e "${COLOR_CYAN}${COLOR_BOLD}+----+---------------------------+-------+-----------------+----------------------------------------+${COLOR_RESET}"
+                for i in "${!rec_ids[@]}"; do
+                    printf "| %-2d | %-25s | %-5s | %-15s | %-38s |\n" "$((i + 1))" "${rec_names[$i]}" "${rec_types[$i]}" "${rec_ips[$i]}" "${rec_comments[$i]}"
+                done
+                echo -e "${COLOR_CYAN}${COLOR_BOLD}+----+---------------------------+-------+-----------------+----------------------------------------+${COLOR_RESET}"
+
+                echo -e "\n${COLOR_YELLOW}Selection Options:${COLOR_RESET}"
+                echo -e "  • Enter numbers separated by commas (e.g. ${COLOR_BOLD}1,3,4${COLOR_RESET})"
+                echo -e "  • Type '${COLOR_BOLD}all${COLOR_RESET}' to select all records"
+                echo -e "  • Press ENTER to cancel"
+                read -rp "Select records: " USER_SEL
+
+                [ -z "$USER_SEL" ] && continue
+
+                local selected_indices=()
+                if [ "$USER_SEL" == "all" ]; then
+                    for i in "${!rec_ids[@]}"; do selected_indices+=("$i"); done
+                else
+                    IFS=',' read -ra S_PARTS <<< "$USER_SEL"
+                    for p in "${S_PARTS[@]}"; do
+                        p=$(echo "$p" | tr -d ' ')
+                        if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1 ] && [ "$p" -le "$total_found" ]; then
+                            selected_indices+=("$((p - 1))")
+                        fi
+                    done
+                fi
+
+                if [ ${#selected_indices[@]} -eq 0 ]; then
+                    echo "No valid selection."
+                    continue
+                fi
+
+                echo -e "\nAction for ${COLOR_GREEN}${#selected_indices[@]}${COLOR_RESET} selected record(s):"
+                echo "  [1] Delete selected records from Cloudflare"
+                echo "  [2] Batch Edit Comment / Tag"
+                echo "  [3] Edit IP Address (Single record only)"
+                echo "  [0] Cancel"
+                read -rp "Choose action [0-3]: " B_ACT
+
+                case "$B_ACT" in
+                    1)
+                        read -rp "Are you sure you want to delete ${#selected_indices[@]} record(s)? [y/N]: " CONF_DEL
+                        if [[ "$CONF_DEL" =~ ^[Yy]$ ]]; then
+                            for s_idx in "${selected_indices[@]}"; do
+                                local d_id="${rec_ids[$s_idx]}"
+                                curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records/$d_id" \
+                                     -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" >/dev/null
+                                echo -e "  ${COLOR_RED}✓ Deleted:${COLOR_RESET} ${rec_names[$s_idx]} -> ${rec_ips[$s_idx]}"
+                            done
+                            log OK "Deleted ${#selected_indices[@]} clean IP records."
+                        fi
+                        ;;
+                    2)
+                        read -rp "Enter NEW Comment tag for selected records: " NEW_COMMENT
+                        if [ -n "$NEW_COMMENT" ]; then
+                            for s_idx in "${selected_indices[@]}"; do
+                                local d_id="${rec_ids[$s_idx]}"
+                                local full_cmt="PG-CleanIP: $NEW_COMMENT | Updated $(date '+%Y-%m-%d')"
+                                curl -s -X PATCH "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records/$d_id" \
+                                     -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" \
+                                     --data "{\"comment\":\"$full_cmt\"}" >/dev/null
+                                echo -e "  ${COLOR_GREEN}✓ Updated comment:${COLOR_RESET} ${rec_names[$s_idx]}"
+                            done
+                            log OK "Updated comments for ${#selected_indices[@]} records."
+                        fi
+                        ;;
+                    3)
+                        if [ ${#selected_indices[@]} -ne 1 ]; then
+                            echo -e "${COLOR_RED}IP edit can only be performed on 1 record at a time.${COLOR_RESET}"
+                        else
+                            local single_i="${selected_indices[0]}"
+                            read -rp "Enter new IP for ${rec_names[$single_i]}: " REPL_IP
+                            REPL_IP=$(echo "$REPL_IP" | tr -d ' ')
+                            if [ -n "$REPL_IP" ]; then
+                                local d_id="${rec_ids[$single_i]}"
+                                local n_type="A"
+                                [[ "$REPL_IP" == *:* ]] && n_type="AAAA"
+                                curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records/$d_id" \
+                                     -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" \
+                                     --data "{\"type\":\"$n_type\",\"name\":\"${rec_names[$single_i]}\",\"content\":\"$REPL_IP\",\"ttl\":1,\"proxied\":false,\"comment\":\"${rec_comments[$single_i]}\"}" >/dev/null
+                                log OK "Record ${rec_names[$single_i]} updated to $REPL_IP"
+                            fi
+                        fi
+                        ;;
+                    *) ;;
+                esac
+                ;;
+            0) break ;;
+            *) ;;
+        esac
+    done
+}
+
+manage_dns_presets() {
+    while true; do
+        echo -e "\n${COLOR_CYAN}${COLOR_BOLD}--- Subdomain Templates / Presets ---${COLOR_RESET}"
+        jq -r 'to_entries[] | "  [" + .key + "]: " + (.value | join(", "))' "$PRESETS_FILE"
+        echo ""
+        echo "  [1] Add / Update Preset"
+        echo "  [2] Delete Preset"
+        echo "  [0] Back"
+        read -rp "Select Option [0-2]: " PR_OPT
+
+        case "$PR_OPT" in
+            1)
+                read -rp "Enter Preset Name (e.g. speed / cdn): " PNAME
+                PNAME=$(echo "$PNAME" | tr ' ' '_')
+                read -rp "Enter subdomains (comma-separated, e.g. sub1, cdn, direct, vpn): " PSUBS
+                if [ -n "$PNAME" ] && [ -n "$PSUBS" ]; then
+                    local subs_json
+                    subs_json=$(echo "$PSUBS" | tr ',' '\n' | sed 's/^[ \t]*//;s/[ \t]*$//' | grep -v '^$' | jq -R . | jq -s .)
+                    local tmp_pr
+                    tmp_pr=$(mktemp)
+                    jq --arg k "$PNAME" --argjson v "$subs_json" '.[$k] = $v' "$PRESETS_FILE" > "$tmp_pr" && mv "$tmp_pr" "$PRESETS_FILE"
+                    log OK "Preset '$PNAME' saved successfully."
+                fi
+                ;;
+            2)
+                read -rp "Enter Preset Name to delete: " PNAME_DEL
+                local tmp_del
+                tmp_del=$(mktemp)
+                jq --arg k "$PNAME_DEL" 'del(.[$k])' "$PRESETS_FILE" > "$tmp_del" && mv "$tmp_del" "$PRESETS_FILE"
+                log OK "Preset '$PNAME_DEL' deleted."
+                ;;
+            0) break ;;
+            *) ;;
+        esac
+    done
+}
+
+cloudflare_dns_center_menu() {
+    while true; do
+        echo -e "\n${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
+        echo -e "${COLOR_CYAN}${COLOR_BOLD}|                   [3] CLOUDFLARE DNS CENTER                        |${COLOR_RESET}"
+        echo -e "${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
+        echo -e "  [1] Clean IPs Center (Interactive Table, Multi-Select & Batch Ops)"
+        echo -e "  [2] DNS Subdomain Templates (Presets for New Nodes)"
+        echo -e "  [0] Back to Main Menu"
+        read -rp "Select Option [0-2]: " CFC_OPT
+        case "$CFC_OPT" in
+            1) manage_clean_ips_interactive ;;
+            2) manage_dns_presets ;;
+            0) break ;;
+            *) echo "Invalid option." ;;
+        esac
+    done
+}
+
+# ==============================================================================
+# MAIN INTERFACE
+# ==============================================================================
+
 install_base_tools
 init_db
 
 while true; do
-    echo -e "\n${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
-    echo -e "${COLOR_CYAN}${COLOR_BOLD}|                PASARGUARD MULTI-NODE AUTO-DEPLOYER                 |${COLOR_RESET}"
-    echo -e "${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
-    echo -e "  [1] Deploy New Node (Multi-IP, DNS Presets & Zero Error)"
-    echo -e "  [2] Issue Wildcard SSL Certificate (Let's Encrypt + Cloudflare)"
-    echo -e "  [3] Sync SSL to Local Master Server"
-    echo -e "  [4] Manage Saved Nodes (Inspect, IP Migration, Multi-SSL, Cloudflare Records)"
-    echo -e "  [5] Domain Profiles Manager"
-    echo -e "  [6] DNS Subdomain Presets Manager (Templates for new nodes)"
-    echo -e "  [7] Cloudflare Clean IPs Manager (Round-Robin & Pruning)"
-    echo -e "  [8] Renew & Synchronize All SSLs"
-    echo -e "  [9] View Execution Logs"
-    echo -e "  [10] Exit"
-    echo ""
-    read -rp "Select an option [1-10]: " OPTION
+    echo -e "\n${COLOR_CYAN}${COLOR_BOLD}======================================================================${COLOR_RESET}"
+    echo -e "${COLOR_CYAN}${COLOR_BOLD}                 PASARGUARD MULTI-NODE AUTO-DEPLOYER                  ${COLOR_RESET}"
+    echo -e "${COLOR_CYAN}${COLOR_BOLD}======================================================================${COLOR_RESET}"
+    echo -e "  ${COLOR_BOLD}[1] 🚀 Node Management Center${COLOR_RESET}     (Deploy, 1-Click Migrate, Inbounds)"
+    echo -e "  ${COLOR_BOLD}[2] 🌐 Domains & SSL Manager${COLOR_RESET}      (Certbot, Wildcards, Multi-SSL Sync)"
+    echo -e "  ${COLOR_BOLD}[3] ⚡ Cloudflare DNS Center${COLOR_RESET}      (Clean IPs Table, Presets Templates)"
+    echo -e "  ${COLOR_BOLD}[4] 📋 System Diagnostics & Logs${COLOR_RESET}  (Execution Trace & Health Status)"
+    echo -e "  ${COLOR_BOLD}[0] 🚪 Exit${COLOR_RESET}"
+    echo -e "${COLOR_CYAN}----------------------------------------------------------------------${COLOR_RESET}"
+    read -rp "Select Module [0-4]: " MAIN_CHOICE
 
-    case "$OPTION" in
-        1) deploy_new_node ;;
-        2) issue_wildcard_ssl ;;
-        3) 
-           echo -e "\nSyncing to Master SSL directories..."
-           list_domain_profiles && {
-               read -rp "Select Domain Index: " D_IDX
-               D_SEL=$(jq -r ".[$((D_IDX - 1))].domain" "$DOMAINS_FILE")
-               sudo mkdir -p /var/lib/pasarguard/ssl /var/lib/pasarguard/certs /var/lib/pg-node/certs
-               base_name="${D_SEL%%.*}"
-               sudo cat "/etc/letsencrypt/live/$D_SEL/fullchain.pem" | sudo tee /var/lib/pasarguard/ssl/cert.pem /var/lib/pasarguard/certs/"$base_name".cer /var/lib/pasarguard/certs/cert.pem /var/lib/pg-node/certs/ssl_cert.pem >/dev/null
-               sudo cat "/etc/letsencrypt/live/$D_SEL/privkey.pem" | sudo tee /var/lib/pasarguard/ssl/key.pem /var/lib/pasarguard/certs/"$base_name".key /var/lib/pasarguard/certs/key.pem /var/lib/pg-node/certs/ssl_key.pem >/dev/null
-               sudo chmod 644 /var/lib/pasarguard/ssl/cert.pem /var/lib/pasarguard/certs/*.cer /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || true
-               sudo chmod 600 /var/lib/pasarguard/ssl/key.pem /var/lib/pasarguard/certs/*.key /var/lib/pg-node/certs/ssl_key.pem 2>/dev/null || true
-               pasarguard restart 2>/dev/null || docker compose -f /opt/pasarguard/docker-compose.yml restart 2>/dev/null || true
-               log OK "Master SSL synced and PasarGuard web panel restarted."
-           }
-           ;;
-        4) manage_saved_nodes ;;
-        5) 
-           list_domain_profiles || true
-           echo "  1) Delete Domain Profile"
-           echo "  2) Back to Menu"
-           read -rp "Action: " D_ACT
-           if [ "$D_ACT" == "1" ]; then
-               read -rp "Enter Profile Index to Delete: " DEL_I
-               tmp_m=$(mktemp)
-               jq "del(.[$((DEL_I - 1))])" "$DOMAINS_FILE" > "$tmp_m" && mv "$tmp_m" "$DOMAINS_FILE"
-               log OK "Profile deleted."
-           fi
-           ;;
-        6) manage_dns_presets ;;
-        7) manage_clean_ips ;;
-        8) renew_sync_all_ssl ;;
-        9) [ -f "$LOG_FILE" ] && tail -n 50 "$LOG_FILE" || echo "No logs found." ;;
-        10) echo "Goodbye!"; exit 0 ;;
-        *) echo -e "${COLOR_RED}Invalid option.${COLOR_RESET}" ;;
+    case "$MAIN_CHOICE" in
+        1) node_management_menu ;;
+        2) domain_management_menu ;;
+        3) cloudflare_dns_center_menu ;;
+        4) [ -f "$LOG_FILE" ] && tail -n 50 "$LOG_FILE" || echo "No logs found." ;;
+        0) echo "Goodbye!"; exit 0 ;;
+        *) echo -e "${COLOR_RED}Invalid choice.${COLOR_RESET}" ;;
     esac
 done
