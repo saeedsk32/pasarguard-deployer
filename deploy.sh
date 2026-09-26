@@ -357,7 +357,7 @@ REMOTE_INSTALL
 
         sleep 2
         local token_candidate
-        token_candidate=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' /opt/pg-node/.env 2>/dev/null | head -n 1" || true)
+        token_candidate=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "grep -oE '[0-9a-fA-F-]{36}' /opt/pg-node/.env 2>/dev/null || true 2>/dev/null | head -n 1" || true)
         [ -n "$token_candidate" ] && node_token="$token_candidate"
     fi
 
@@ -547,8 +547,8 @@ manage_saved_nodes() {
     case "$N_ACT" in
         1)
             local cert_data single_cert
-            cert_data=$(eval "$ssh_cmd 'cat /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || cat /var/lib/pasarguard/ssl/cert.pem 2>/dev/null'" || true)
-            single_cert=$(echo "$cert_data" | openssl x509 2>/dev/null || echo "$cert_data")
+            cert_data=$(eval "$ssh_cmd 'cat /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || cat /var/lib/pasarguard/ssl/cert.pem 2>/dev/null || true 2>/dev/null || cat /var/lib/pasarguard/ssl/cert.pem 2>/dev/null'" || true)
+            single_cert=$(echo "$cert_data" | openssl x509 2>/dev/null); [ -z "$single_cert" ] && single_cert="$cert_data"
             
             echo -e "\n  ${C_GREEN}╭────────────────────────────────────────────────────────────────────────╮${RST}"
             echo -e "  ${C_GREEN}│${RST}        ${BOLD}${C_WHITE}PASARGUARD PANEL CONNECTION DETAILS${RST}                             ${C_GREEN}│${RST}"
