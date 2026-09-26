@@ -274,10 +274,10 @@ deploy_new_node() {
     SUB_PREFIX=${SUB_PREFIX:-$NODE_HOST}
     local fqdn="$SUB_PREFIX.$base_domain"
 
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Node Port (Main Port) [62051]: ${RST}")" NODE_PORT
-    NODE_PORT=${NODE_PORT:-62051}
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Advanced API Port [62050]: ${RST}")" API_PORT
-    API_PORT=${API_PORT:-62050}
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Node Port (Service Port) [62050]: ${RST}")" NODE_PORT
+    NODE_PORT=${NODE_PORT:-62050}
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Advanced API Port [62051]: ${RST}")" API_PORT
+    API_PORT=${API_PORT:-62051}
     read -rp "$(echo -e "  ${C_PURPLE}▶ Protocol: [1] gRPC (Default) or [2] REST [1]: ${RST}")" PROTO_CHOICE
     local proto_flag="--use-grpc" proto_str="grpc"
     [ "$PROTO_CHOICE" == "2" ] && { proto_flag="--use-rest"; proto_str="rest"; }
@@ -495,7 +495,7 @@ manage_saved_nodes() {
             echo -e "    ${C_RED}[13]${RST} 💣 Completely Uninstall Node & Clean DNS"
             echo -e "    ${C_GRAY}[0]${RST}   🔙 Back to Node List"
 
-            read -rp "$(echo -e "\n  ${C_PURPLE}▶ Choose Action [0-13]: ${RST}")" N_ACT < /dev/tty
+            read -rp "$(echo -e "\n  ${C_PURPLE}▶ Choose Action [0-15]: ${RST}")" N_ACT < /dev/tty
 
             case "$N_ACT" in
                 1)
@@ -579,6 +579,32 @@ manage_saved_nodes() {
                     log OK "Node removed from local inventory."
                     read -rp "  Press [ENTER] to continue..." < /dev/tty
                     break
+                    ;;
+                14)
+                    read -rp "  ▶ Enter New API Key (Leave empty to auto-generate UUID): " NEW_MANUAL_KEY < /dev/tty
+                    if [ -z "$NEW_MANUAL_KEY" ]; then
+                        NEW_MANUAL_KEY=$(python3 -c "import uuid; print(uuid.uuid4())")
+                    fi
+                    eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; sed -i "s/^API_KEY=.*/API_KEY=$NEW_MANUAL_KEY/" /opt/pg-node/.env 2>/dev/null || true; pg-node restart -n 2>/dev/null || true'"
+                    local tmp_k; tmp_k=$(mktemp)
+                    jq --arg n "$idx_pos" --arg k "$NEW_MANUAL_KEY" '.[($n|tonumber)].api_token = $k' "$NODES_FILE" > "$tmp_k" && mv "$tmp_k" "$NODES_FILE"
+                    target_token="$NEW_MANUAL_KEY"
+                    log OK "API Key successfully updated to $NEW_MANUAL_KEY"
+                    read -rp "  Press [ENTER] to continue..." < /dev/tty
+                    ;;
+                15)
+                    read -rp "  ▶ New Service Port (Node Port) [$target_sport]: " NEW_SPORT < /dev/tty
+                    NEW_SPORT=${NEW_SPORT:-$target_sport}
+                    read -rp "  ▶ New API Port [$target_aport]: " NEW_APORT < /dev/tty
+                    NEW_APORT=${NEW_APORT:-$target_aport}
+                    
+                    eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; sed -i "s/^SERVICE_PORT=.*/SERVICE_PORT=$NEW_SPORT/" /opt/pg-node/.env 2>/dev/null || true; sed -i "s/^API_PORT=.*/API_PORT=$NEW_APORT/" /opt/pg-node/.env 2>/dev/null || true; ufw allow $NEW_SPORT/tcp >/dev/null 2>&1; ufw allow $NEW_APORT/tcp >/dev/null 2>&1; pg-node restart -n 2>/dev/null || true'"
+                    local tmp_po; tmp_po=$(mktemp)
+                    jq --arg n "$idx_pos" --arg sp "$NEW_SPORT" --arg ap "$NEW_APORT" '.[($n|tonumber)].service_port = ($sp|tonumber) | .[($n|tonumber)].api_port = ($ap|tonumber)' "$NODES_FILE" > "$tmp_po" && mv "$tmp_po" "$NODES_FILE"
+                    target_sport="$NEW_SPORT"
+                    target_aport="$NEW_APORT"
+                    log OK "Ports updated: Service Port = $NEW_SPORT | API Port = $NEW_APORT"
+                    read -rp "  Press [ENTER] to continue..." < /dev/tty
                     ;;
                 13)
                     read -rp "  Type 'yes' to completely uninstall node and clean DNS: " PURGE_C < /dev/tty
