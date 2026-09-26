@@ -165,10 +165,10 @@ deploy_new_node() {
     read -rp "$(echo -e "  ${C_PURPLE}▶ Node Hostname [node-DE1]: ${RST}")" NODE_NAME
     NODE_NAME=${NODE_NAME:-"node-DE1"}
     
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Primary Server IPv4: ${RST}")" NODE_IP
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Server IPv6 (Optional, Enter to skip): ${RST}")" NODE_IPV6
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Primary Server IPv4 (ex: 143.14.59.118): ${RST}")" NODE_IP
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Server IPv6 (ex: 2a01:4f8:1c1:2::1 - Optional): ${RST}")" NODE_IPV6
     NODE_IPV6=$(echo "$NODE_IPV6" | tr -d ' ')
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Additional IPv4s (comma-separated, Optional): ${RST}")" EXTRA_IPS
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Additional IPv4s (ex: 143.14.59.119, 143.14.59.120 - Optional): ${RST}")" EXTRA_IPS
     
     read -rp "$(echo -e "  ${C_PURPLE}▶ SSH Port [22]: ${RST}")" NODE_SSH_PORT
     NODE_SSH_PORT=${NODE_SSH_PORT:-22}
@@ -215,7 +215,7 @@ deploy_new_node() {
         log INFO "Loaded DNS Preset: $chosen_key"
     fi
 
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Extra Custom Subdomains (comma-separated, Optional): ${RST}")" MANUAL_SUBS
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Extra Custom Subdomains (ex: vpn, direct, proxy - Optional): ${RST}")" MANUAL_SUBS
 
     echo -e "\n  ${BOLD}${C_CYAN}Multi-Domain SSL Pre-Deployment:${RST}"
     jq -r 'to_entries[] | "    \u001b[38;5;141m[" + ((.key + 1) | tostring) + "]\u001b[0m \u001b[1m" + .value.domain + "\u001b[0m"' "$DOMAINS_FILE"
@@ -428,7 +428,7 @@ migrate_node_ip() {
 
     echo -e "\n  ${BOLD}${C_CYAN}--- Migrate / Change IP for Node: $target_host ---${RST}"
     echo -e "  Current Registered IP: ${C_RED}$old_ip${RST}"
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Enter NEW Server IPv4: ${RST}")" NEW_IP
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Enter NEW Server IPv4 (ex: 185.120.30.40): ${RST}")" NEW_IP
     NEW_IP=$(echo "$NEW_IP" | tr -d ' ')
     [ -z "$NEW_IP" ] && { log ERROR "New IP cannot be empty."; return 1; }
 
@@ -836,7 +836,7 @@ manage_clean_ips_interactive() {
                 ISP_LABEL=${ISP_LABEL:-"Clean IP"}
 
                 echo -e "  ${C_GRAY}Paste multiple Clean IPs (comma, space, or newline separated):${RST}"
-                read -rp "$(echo -e "  ${C_PURPLE}▶ IPs: ${RST}")" RAW_IPS
+                read -rp "$(echo -e "  ${C_PURPLE}▶ IPs (ex: 104.16.12.34, 104.17.56.78): ${RST}")" RAW_IPS
 
                 local clean_ip_arr=($(echo "$RAW_IPS" | tr ',' ' ' | tr '\n' ' '))
                 local count_added=0
@@ -1000,9 +1000,9 @@ manage_dns_presets() {
 
         case "$PR_OPT" in
             1)
-                read -rp "$(echo -e "  ${C_PURPLE}▶ Preset Name (e.g. speed): ${RST}")" PNAME
+                read -rp "$(echo -e "  ${C_PURPLE}▶ Preset Name (ex: speed / cdn): ${RST}")" PNAME
                 PNAME=$(echo "$PNAME" | tr ' ' '_')
-                read -rp "$(echo -e "  ${C_PURPLE}▶ Subdomains (comma-separated): ${RST}")" PSUBS
+                read -rp "$(echo -e "  ${C_PURPLE}▶ Subdomains (ex: sub1, cdn, direct, vpn): ${RST}")" PSUBS
                 if [ -n "$PNAME" ] && [ -n "$PSUBS" ]; then
                     local subs_json
                     subs_json=$(echo "$PSUBS" | tr ',' '\n' | sed 's/^[ \t]*//;s/[ \t]*$//' | grep -v '^$' | jq -R . | jq -s .)
