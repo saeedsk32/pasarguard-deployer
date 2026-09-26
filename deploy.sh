@@ -5,7 +5,7 @@
 # High-End Visual TUI | Multi-Node | Multi-IP | Clean IPs | Backup & Restore
 # ==============================================================================
 
-# set -o pipefail
+# 
 
 REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 APP_DIR="$(cd "$(dirname "$REAL_PATH")" && pwd)"
@@ -509,7 +509,7 @@ manage_saved_nodes() {
     target_sport=$(jq -r ".[$((N_IDX - 1))].service_port // 62051" "$NODES_FILE")
     target_aport=$(jq -r ".[$((N_IDX - 1))].api_port // 62050" "$NODES_FILE")
     target_token=$(jq -r ".[$((N_IDX - 1))].api_token // empty" "$NODES_FILE")
-    target_proto=$(jq -r ".[$((N_IDX - 1))].protocol // 'grpc'" "$NODES_FILE")
+    target_proto=$(jq -r ".[$((N_IDX - 1))].protocol // "grpc"" "$NODES_FILE")
     target_bdom=$(jq -r ".[$((N_IDX - 1))].base_domain" "$NODES_FILE")
 
     local ssh_cmd="sshpass -p '$target_pass' ssh -p $target_port -o StrictHostKeyChecking=no $target_user@$target_ip"
