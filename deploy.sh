@@ -361,10 +361,12 @@ chmod +x /usr/local/bin/pg-node
 rm -rf /tmp/node_ssl
 REMOTE_INSTALL
 
-        sleep 2
-        local token_candidate
-        token_candidate=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' /opt/pg-node/.env 2>/dev/null | head -n 1" || true)
-        [ -n "$token_candidate" ] && node_token="$token_candidate"
+        sleep 3
+        local token_candidate=""
+        token_candidate=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat /opt/pg-node/.env 2>/dev/null" 2>/dev/null | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | head -n 1 || true)
+        if [ -n "$token_candidate" ]; then
+            node_token="$token_candidate"
+        fi
     fi
 
     local leaf_cert
@@ -419,6 +421,8 @@ REMOTE_INSTALL
     echo -e "  ${C_GREEN}│${RST}  ${BOLD}Certificate (Copy exactly into Panel Certificate box):${RST}                ${C_GREEN}│${RST}"
     echo -e "  ${C_GREEN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
     echo -e "${C_YELLOW}$leaf_cert${RST}\n"
+    echo -e "  ${C_CYAN}------------------------------------------------------------------------${RST}"
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Copy the information above, then press [ENTER] to return to menu... ${RST}")"
 }
 
 migrate_node_ip() {
@@ -1175,7 +1179,7 @@ init_db
 
 while true; do
     ui_banner
-    local active_nodes_count active_domains_count
+    active_nodes_count=0; active_domains_count=0
     active_nodes_count=$(jq '. | length' "$NODES_FILE" 2>/dev/null || echo 0)
     active_domains_count=$(jq '. | length' "$DOMAINS_FILE" 2>/dev/null || echo 0)
 
