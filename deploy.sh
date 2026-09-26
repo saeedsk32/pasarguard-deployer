@@ -176,7 +176,6 @@ deploy_new_node() {
     fi
     log INFO "Selected protocol: $PROTO_NAME"
 
-    # DNS Presets Selection
     echo -e "\n${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
     echo -e "${COLOR_YELLOW}Cloudflare DNS Auto-Pointing Presets:${COLOR_RESET}"
     local p_keys=()
@@ -204,7 +203,6 @@ deploy_new_node() {
 
     read -rp "Additional Custom Subdomains (comma-separated, or Enter to skip): " MANUAL_SUBS
 
-    # Multi-Domain SSLs Prompt
     echo -e "\n${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
     echo -e "${COLOR_YELLOW}Multi-Domain SSL Pre-Deployment:${COLOR_RESET}"
     echo -e "Select domain certificates to upload into this node (for multi-inbounds):"
@@ -896,14 +894,17 @@ manage_clean_ips_interactive() {
 
                 echo -e "\n${COLOR_YELLOW}Selection Options:${COLOR_RESET}"
                 echo -e "  • Enter numbers separated by commas (e.g. ${COLOR_BOLD}1,3,4${COLOR_RESET})"
-                echo -e "  • Type '${COLOR_BOLD}all${COLOR_RESET}' to select all records"
+                echo -e "  • Type '${COLOR_BOLD}all${COLOR_RESET}' (or '${COLOR_BOLD}a${COLOR_RESET}') to select all records"
                 echo -e "  • Press ENTER to cancel"
                 read -rp "Select records: " USER_SEL
 
                 [ -z "$USER_SEL" ] && continue
 
                 local selected_indices=()
-                if [ "$USER_SEL" == "all" ]; then
+                local lower_sel
+                lower_sel=$(echo "$USER_SEL" | tr '[:upper:]' '[:lower:]' | xargs)
+
+                if [[ "$lower_sel" =~ ^(all|a|al)$ ]]; then
                     for i in "${!rec_ids[@]}"; do selected_indices+=("$i"); done
                 else
                     IFS=',' read -ra S_PARTS <<< "$USER_SEL"
@@ -924,8 +925,9 @@ manage_clean_ips_interactive() {
                 echo "  [1] Delete selected records from Cloudflare"
                 echo "  [2] Batch Edit Comment / Tag"
                 echo "  [3] Edit IP Address (Single record only)"
+                echo "  [4] Batch Rename / Move Subdomain (Change record host name)"
                 echo "  [0] Cancel"
-                read -rp "Choose action [0-3]: " B_ACT
+                read -rp "Choose action [0-4]: " B_ACT
 
                 case "$B_ACT" in
                     1)
@@ -970,6 +972,24 @@ manage_clean_ips_interactive() {
                                      --data "{\"type\":\"$n_type\",\"name\":\"${rec_names[$single_i]}\",\"content\":\"$REPL_IP\",\"ttl\":1,\"proxied\":false,\"comment\":\"${rec_comments[$single_i]}\"}" >/dev/null
                                 log OK "Record ${rec_names[$single_i]} updated to $REPL_IP"
                             fi
+                        fi
+                        ;;
+                    4)
+                        read -rp "Enter NEW Subdomain prefix for selected records (e.g. 'speed' -> speed.$c_dom): " NEW_SUB_PREFIX
+                        NEW_SUB_PREFIX=$(echo "$NEW_SUB_PREFIX" | tr -d ' ')
+                        if [ -n "$NEW_SUB_PREFIX" ]; then
+                            local new_fqdn="$NEW_SUB_PREFIX.$c_dom"
+                            for s_idx in "${selected_indices[@]}"; do
+                                local d_id="${rec_ids[$s_idx]}"
+                                local curr_type="${rec_types[$s_idx]}"
+                                local curr_ip="${rec_ips[$s_idx]}"
+                                local curr_cmt="${rec_comments[$s_idx]}"
+                                curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records/$d_id" \
+                                     -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" \
+                                     --data "{\"type\":\"$curr_type\",\"name\":\"$new_fqdn\",\"content\":\"$curr_ip\",\"ttl\":1,\"proxied\":false,\"comment\":\"$curr_cmt\"}" >/dev/null
+                                echo -e "  ${COLOR_GREEN}✓ Renamed:${COLOR_RESET} ${rec_names[$s_idx]} -> ${COLOR_BOLD}$new_fqdn${COLOR_RESET} ($curr_ip)"
+                            done
+                            log OK "Renamed ${#selected_indices[@]} records to $new_fqdn."
                         fi
                         ;;
                     *) ;;
