@@ -138,6 +138,90 @@ upsert_cloudflare_dns() {
 
 # ==============================================================================
 # SECTION 1: NODE MANAGEMENT
+
+toggle_node_bbr() {
+    local ip="$1" port="$2" user="$3" pass="$4" host="$5"
+    local ssh_c="sshpass -p '$pass' ssh -p $port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR $user@$ip"
+    
+    local curr_cc
+    curr_cc=$(eval "$ssh_c 'sysctl -n net.ipv4.tcp_congestion_control'" 2>/dev/null || echo "unknown")
+    local bbr_mod
+    bbr_mod=$(eval "$ssh_c 'lsmod | grep -q bbr && echo active || echo inactive'" 2>/dev/null)
+
+    echo -e "\n  ${BOLD}${C_CYAN}--- TCP BBR Status for Node: $host ---${RST}"
+    echo -e "  Active Congestion Control : ${C_GREEN}${curr_cc}${RST}"
+    echo -e "  Kernel Module Status      : ${C_YELLOW}${bbr_mod}${RST}"
+    echo ""
+    echo -e "    ${C_CYAN}[1]${RST} Enable BBR (fq + bbr)"
+    echo -e "    ${C_CYAN}[2]${RST} Disable BBR (Revert to cubic)"
+    echo -e "    ${C_GRAY}[0]${RST} Back"
+    read -rp "$(echo -e "\n  ${C_PURPLE}▶ Choose Action [0-2]: ${RST}")" BBR_ACT
+
+    case "$BBR_ACT" in
+        1)
+            eval "$ssh_c 'modprobe tcp_bbr 2>/dev/null || true; echo "net.core.default_qdisc=fq" > /etc/sysctl.d/99-bbr.conf; echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.d/99-bbr.conf; sysctl --system >/dev/null 2>&1'"
+            log OK "TCP BBR enabled successfully on $host."
+            ;;
+        2)
+            eval "$ssh_c 'echo "net.core.default_qdisc=pfifo_fast" > /etc/sysctl.d/99-bbr.conf; echo "net.ipv4.tcp_congestion_control=cubic" >> /etc/sysctl.d/99-bbr.conf; sysctl --system >/dev/null 2>&1'"
+            log OK "BBR disabled. Reverted to standard cubic algorithm."
+            ;;
+        *) ;;
+    esac
+}
+
+edit_node_dns_record() {
+    local n_idx="$1"
+    local target_bdom=$(jq -r ".[\$n_idx].base_domain" "$NODES_FILE")
+    local target_host=$(jq -r ".[\$n_idx].hostname" "$NODES_FILE")
+    local c_tok=$(jq -r --arg bd "$target_bdom" '.[] | select(.domain == $bd) | .token' "$DOMAINS_FILE")
+    local c_zid=$(jq -r --arg bd "$target_bdom" '.[] | select(.domain == $bd) | .zone_id' "$DOMAINS_FILE")
+
+    local recs=()
+    while IFS= read -r r; do [ -n "$r" ] && recs+=("$r"); done < <(jq -r ".[\$n_idx].dns_records[]? // empty" "$NODES_FILE")
+
+    if [ ${#recs[@]} -eq 0 ]; then
+        echo -e "  ${C_YELLOW}No DNS records registered for this node.${RST}"
+        return
+    fi
+
+    echo -e "\n  ${BOLD}${C_CYAN}Current DNS Records for $target_host:${RST}"
+    for i in "${!recs[@]}"; do
+        echo -e "    ${C_PURPLE}[$((i + 1))]${RST} ${recs[$i]}"
+    done
+    read -rp "$(echo -e "\n  ${C_PURPLE}▶ Select record to edit [1-${#recs[@]}]: ${RST}")" R_SEL
+    if ! [[ "$R_SEL" =~ ^[0-9]+$ ]] || [ "$R_SEL" -lt 1 ] || [ "$R_SEL" -gt "${#recs[@]}" ]; then
+        return
+    fi
+
+    local chosen_entry="${recs[$((R_SEL - 1))]}"
+    local fqdn=$(echo "$chosen_entry" | awk '{print $1}')
+    local curr_ip=$(echo "$chosen_entry" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+')
+
+    read -rp "$(echo -e "  ${C_PURPLE}▶ New IP Address [$curr_ip]: ${RST}")" NEW_R_IP
+    NEW_R_IP=${NEW_R_IP:-"$curr_ip"}
+    read -rp "$(echo -e "  ${C_PURPLE}▶ New Cloudflare Comment tag (ex: Edge-MCI): ${RST}")" NEW_R_TAG
+    NEW_R_TAG=${NEW_R_TAG:-"Custom-Record"}
+
+    local full_comment="PG-Node: $target_host | $NEW_R_TAG"
+    local rec_type="A"
+    [[ "$NEW_R_IP" == *:* ]] && rec_type="AAAA"
+
+    local rec_id
+    rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?name=$fqdn"          -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty')
+
+    if [ -n "$rec_id" ]; then
+        curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records/$rec_id"              -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json"              --data "{"type":"$rec_type","name":"$fqdn","content":"$NEW_R_IP","ttl":1,"proxied":false,"comment":"$full_comment"}" >/dev/null
+        
+        local updated_entry="$fqdn ($NEW_R_IP)"
+        local tmp_f=$(mktemp)
+        jq --arg n "$n_idx" --arg o "$chosen_entry" --arg u "$updated_entry"            '.[($n|tonumber)].dns_records = [.[($n|tonumber)].dns_records[] | if . == $o then $u else . end]' "$NODES_FILE" > "$tmp_f" && mv "$tmp_f" "$NODES_FILE"
+        log OK "Record updated to $NEW_R_IP with tag: [$full_comment]"
+    else
+        log ERROR "Could not locate record on Cloudflare."
+    fi
+}
+
 # ==============================================================================
 
 deploy_new_node() {
@@ -247,7 +331,7 @@ deploy_new_node() {
 
     log INFO "Verifying SSH connection to $NODE_IP:$NODE_SSH_PORT..."
     local ssh_err
-    ssh_err=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 "$NODE_SSH_USER@$NODE_IP" "echo connected" 2>&1)
+    ssh_err=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 "$NODE_SSH_USER@$NODE_IP" "echo connected" 2>&1)
     if [[ $? -ne 0 ]]; then
         log ERROR "Cannot connect via SSH to $NODE_IP:$NODE_SSH_PORT"
         echo -e "  ${C_RED}Raw SSH Error:${RST} ${DIM}$ssh_err${RST}"
@@ -258,7 +342,7 @@ deploy_new_node() {
     log OK "SSH connection established."
 
     log INFO "Tuning kernel TCP BBR and baseline firewall..."
-    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" bash << REMOTE_INIT
+    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" bash << REMOTE_INIT
 export DEBIAN_FRONTEND=noninteractive
 hostnamectl set-hostname "$NODE_NAME" || true
 modprobe tcp_bbr 2>/dev/null || true
@@ -273,8 +357,8 @@ mkdir -p /tmp/node_ssl /var/lib/pg-node/certs /var/lib/pasarguard/ssl /opt/pg-no
 REMOTE_INIT
 
     log INFO "Deploying Wildcard SSL keys to remote node..."
-    cat "$fullchain_src" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat > /tmp/node_ssl/cert.pem && chmod 644 /tmp/node_ssl/cert.pem"
-    cat "$key_src" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat > /tmp/node_ssl/key.pem && chmod 600 /tmp/node_ssl/key.pem"
+    cat "$fullchain_src" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" "cat > /tmp/node_ssl/cert.pem && chmod 644 /tmp/node_ssl/cert.pem"
+    cat "$key_src" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" "cat > /tmp/node_ssl/key.pem && chmod 600 /tmp/node_ssl/key.pem"
     log OK "Primary Wildcard SSL transferred."
 
     local installed_ssl_domains=("$selected_domain")
@@ -290,9 +374,9 @@ REMOTE_INIT
                     local e_key="/etc/letsencrypt/live/$extra_dom/privkey.pem"
                     if [ -f "$e_fullchain" ] && [ -f "$e_key" ]; then
                         log INFO "Injecting additional Wildcard SSL for $extra_dom..."
-                        sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "mkdir -p /var/lib/pg-node/certs/$extra_dom"
-                        cat "$e_fullchain" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat > /var/lib/pg-node/certs/$extra_dom/fullchain.pem && chmod 644 /var/lib/pg-node/certs/$extra_dom/fullchain.pem"
-                        cat "$e_key" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat > /var/lib/pg-node/certs/$extra_dom/privkey.pem && chmod 600 /var/lib/pg-node/certs/$extra_dom/privkey.pem"
+                        sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" "mkdir -p /var/lib/pg-node/certs/$extra_dom"
+                        cat "$e_fullchain" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" "cat > /var/lib/pg-node/certs/$extra_dom/fullchain.pem && chmod 644 /var/lib/pg-node/certs/$extra_dom/fullchain.pem"
+                        cat "$e_key" | sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" "cat > /var/lib/pg-node/certs/$extra_dom/privkey.pem && chmod 600 /var/lib/pg-node/certs/$extra_dom/privkey.pem"
                         installed_ssl_domains+=("$extra_dom")
                         log OK "Injected SSL for: $extra_dom"
                     fi
@@ -347,7 +431,7 @@ REMOTE_INIT
     local node_token="Not detected"
     if [[ "$INSTALL_PG" =~ ^[Yy]$ ]]; then
         log INFO "Provisioning PasarGuard Node core ($PROTO_NAME)..."
-        sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" bash << REMOTE_INSTALL
+        sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" bash << REMOTE_INSTALL
 export TERM=xterm-256color
 export DEBIAN_FRONTEND=noninteractive
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -363,7 +447,7 @@ REMOTE_INSTALL
 
         sleep 3
         local token_candidate=""
-        token_candidate=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "cat /opt/pg-node/.env 2>/dev/null" 2>/dev/null | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | head -n 1 || true)
+        token_candidate=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" "cat /opt/pg-node/.env 2>/dev/null" 2>/dev/null | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | head -n 1 || true)
         if [ -n "$token_candidate" ]; then
             node_token="$token_candidate"
         fi
@@ -522,7 +606,7 @@ manage_saved_nodes() {
     target_proto=$(jq -r ".[$((N_IDX - 1))].protocol // 'grpc'" "$NODES_FILE")
     target_bdom=$(jq -r ".[$((N_IDX - 1))].base_domain" "$NODES_FILE")
 
-    local ssh_cmd="sshpass -p '$target_pass' ssh -p $target_port -o StrictHostKeyChecking=no $target_user@$target_ip"
+    local ssh_cmd="sshpass -p '$target_pass' ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR $target_user@$target_ip"
 
     if [ -z "$target_token" ] || [[ "$target_token" == *"#"* ]] || [ "$target_token" == "Not detected" ] || [ ${#target_token} -ne 36 ]; then
         local live_tok
@@ -544,6 +628,8 @@ manage_saved_nodes() {
     echo -e "    ${C_CYAN}[4]${RST} 🌐 Add Extra Subdomain to this Node"
     echo -e "    ${C_CYAN}[5]${RST} ⚡ Switch Protocol (gRPC <-> REST)"
     echo -e "    ${C_CYAN}[6]${RST} ⚙️  Manage Systemd Service"
+    echo -e "    ${C_GREEN}[14]${RST} 🚀 TCP BBR Congestion Control (Status, Enable/Disable)"
+    echo -e "    ${C_CYAN}[15]${RST} 🏷️  Edit Node DNS Records & Cloudflare Comments"
     echo -e "    ${C_CYAN}[7]${RST} 📦 Update / Change Xray-core"
     echo -e "    ${C_CYAN}[8]${RST} 🔄 Update PasarGuard Node Software"
     echo -e "    ${C_CYAN}[9]${RST} 🗺️  Update GeoFiles (GeoIP & GeoSite)"
@@ -555,6 +641,8 @@ manage_saved_nodes() {
     read -rp "$(echo -e "\n  ${C_PURPLE}▶ Choose Action [0-13]: ${RST}")" N_ACT
 
     case "$N_ACT" in
+        14) toggle_node_bbr "$target_ip" "$target_port" "$target_user" "$target_pass" "$target_host" ;;
+        15) edit_node_dns_record "$((N_IDX - 1))" ;;
         1)
             local cert_data single_cert
             cert_data=$(eval "$ssh_cmd 'cat /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || cat /var/lib/pasarguard/ssl/cert.pem 2>/dev/null'" || true)
@@ -748,16 +836,16 @@ renew_sync_all_ssl() {
 
                 if [ "$nbdom" == "$dom" ]; then
                     log INFO "Pushing renewed cert to node ($nip)..."
-                    cat "$cert" | sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no "$nuser@$nip" "cat > /var/lib/pg-node/certs/ssl_cert.pem && cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pasarguard/ssl/cert.pem"
-                    cat "$key" | sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no "$nuser@$nip" "cat > /var/lib/pg-node/certs/ssl_key.pem && cat > /var/lib/pasarguard/ssl/key.pem && chmod 600 /var/lib/pg-node/certs/ssl_key.pem /var/lib/pasarguard/ssl/key.pem"
-                    sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no "$nuser@$nip" "export PATH=/usr/local/bin:\$PATH; pg-node restart -n 2>/dev/null || true"
+                    cat "$cert" | sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$nuser@$nip" "cat > /var/lib/pg-node/certs/ssl_cert.pem && cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pasarguard/ssl/cert.pem"
+                    cat "$key" | sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$nuser@$nip" "cat > /var/lib/pg-node/certs/ssl_key.pem && cat > /var/lib/pasarguard/ssl/key.pem && chmod 600 /var/lib/pg-node/certs/ssl_key.pem /var/lib/pasarguard/ssl/key.pem"
+                    sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$nuser@$nip" "export PATH=/usr/local/bin:\$PATH; pg-node restart -n 2>/dev/null || true"
                 fi
 
                 local is_sec
                 is_sec=$(jq -r --arg d "$dom" ".[$n].ssl_domains[]? | select(. == \$d)" "$NODES_FILE")
                 if [ -n "$is_sec" ] && [ "$dom" != "$nbdom" ]; then
-                    cat "$cert" | sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no "$nuser@$nip" "cat > /var/lib/pg-node/certs/$dom/fullchain.pem && chmod 644 /var/lib/pg-node/certs/$dom/fullchain.pem"
-                    cat "$key" | sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no "$nuser@$nip" "cat > /var/lib/pg-node/certs/$dom/privkey.pem && chmod 600 /var/lib/pg-node/certs/$dom/privkey.pem"
+                    cat "$cert" | sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$nuser@$nip" "cat > /var/lib/pg-node/certs/$dom/fullchain.pem && chmod 644 /var/lib/pg-node/certs/$dom/fullchain.pem"
+                    cat "$key" | sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$nuser@$nip" "cat > /var/lib/pg-node/certs/$dom/privkey.pem && chmod 600 /var/lib/pg-node/certs/$dom/privkey.pem"
                 fi
             done
         fi
