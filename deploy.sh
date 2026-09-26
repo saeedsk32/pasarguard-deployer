@@ -32,7 +32,7 @@ BG_PRIMARY="\e[48;5;236m"
 BG_BLUE="\e[48;5;24m"
 
 ui_sub_banner() {
-    clear 2>/dev/null || true
+    # clear
     echo -e "${C_CYAN}┌────────────────────────────────────────────────────────────────────────┐${RST}"
     echo -e "${C_CYAN}│${RST} ${BOLD}${C_BLUE}PasarGuard Deployer${RST} ${C_GRAY}│ By Saeed SK (@saeedsk32) │${RST} ${C_GREEN}Active${RST}                     ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}└────────────────────────────────────────────────────────────────────────┘${RST}"
@@ -364,7 +364,7 @@ REMOTE_INSTALL
 
         sleep 2
         local token_candidate
-        token_candidate=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "grep -oE '[0-9a-fA-F-]{36}' /opt/pg-node/.env 2>/dev/null || true 2>/dev/null | head -n 1" || true)
+        token_candidate=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no "$NODE_SSH_USER@$NODE_IP" "grep -oE '[0-9a-fA-F-]{36}' /opt/pg-node/.env 2>/dev/null 2>/dev/null || true 2>/dev/null | head -n 1" || true)
         [ -n "$token_candidate" ] && node_token="$token_candidate"
     fi
 
@@ -523,7 +523,7 @@ manage_saved_nodes() {
 
     if [ -z "$target_token" ] || [[ "$target_token" == *"#"* ]] || [ "$target_token" == "Not detected" ] || [ ${#target_token} -ne 36 ]; then
         local live_tok
-        live_tok=$(eval "$ssh_cmd 'grep -oE \"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\" /opt/pg-node/.env 2>/dev/null | head -n 1' || true")
+        live_tok=$(eval "$ssh_cmd 'grep -oE \"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\" /opt/pg-node/.env 2>/dev/null 2>/dev/null | head -n 1' || true")
         if [ -n "$live_tok" ]; then
             target_token="$live_tok"
             local tmp_sync
@@ -1160,8 +1160,10 @@ backup_restore_menu() {
                 cat "$DOMAINS_FILE"
                 echo -e "\n  ${C_CYAN}--- nodes.json ---${RST}"
                 cat "$NODES_FILE"
-                read -rp "$(echo -e "\n  ${C_PURPLE}Press [ENTER] to continue...${RST}")"
-                ;;
+                            echo ""
+            echo -e "  [38;5;141mPress [ENTER] to return to node menu...[0m"
+            read -r _dummy < /dev/tty
+            ;;
             0) break ;;
             *) ;;
         esac
