@@ -1,99 +1,93 @@
+<div align="center">
+
 # 🚀 PasarGuard Multi-Node Auto-Deployer
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Platform-PasarGuard-blue?style=for-the-badge" alt="Platform">
-  <img src="https://img.shields.io/badge/Language-Bash-4EAA25?style=for-the-badge&logo=gnu-bash&logoColor=white" alt="Language">
-  <img src="https://img.shields.io/badge/SSL-Let's%20Encrypt%20Wildcard-003A70?style=for-the-badge&logo=letsencrypt&logoColor=white" alt="SSL">
-  <img src="https://img.shields.io/badge/DNS-Cloudflare%20API-F38020?style=for-the-badge&logo=cloudflare&logoColor=white" alt="Cloudflare">
-  <img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" alt="License">
-</p>
+[![Author: Saeed SK](https://img.shields.io/badge/Author-Saeed%20SK%20(@saeedsk32)-blueviolet.svg?style=flat&logo=github)](https://github.com/saeedsk32)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Bash](https://img.shields.io/badge/Language-Bash-4EAA25.svg)](https://www.gnu.org/software/bash/)
+[![Ubuntu](https://img.shields.io/badge/OS-Ubuntu%2022.04%20%7C%2024.04-E95420.svg)](https://ubuntu.com/)
+[![Cloudflare](https://img.shields.io/badge/Cloudflare-DNS%20v4-F38020.svg)](https://cloudflare.com/)
 
-ابزار جامع، ماژولار و تعاملی تحت ترمینال (Bash CLI) جهت خودکارسازی کامل فرآیند پیکربندی سرور، صدور و مدیریت گواهی‌های Wildcard SSL و اتصال امن نودها به سرور مستر در پلتفرم **PasarGuard**.
+**Enterprise-grade DevOps CLI toolkit for orchestrating PasarGuard nodes, automated Cloudflare DNS management, multi-IP routing, and zero-config Let's Encrypt Wildcard SSL.**
+
+Developed with ❤️ by **[Saeed SK](https://github.com/saeedsk32)**
+
+[English](#-english-overview) • [راهنمای فارسی](#-راهنمای-فارسی) • [Quick Install](#-quick-install) • [Author](#-author)
+
+</div>
 
 ---
 
-## ⚡ نصب و راه‌اندازی سریع (Quick Install)
+<h2 id="-english-overview">🌐 English Overview</h2>
 
-روی سرور مستر (Master Server)، دستور تک‌خطی زیر را اجرا کنید:
+### ✨ Core Features
+
+- 🔐 **Zero-Config Wildcard SSL**: Issues and renews Let's Encrypt Wildcard certificates via Cloudflare DNS plugin with cross-signed .
+- 🚀 **Automated Node Provisioning**: Native  CLI orchestration with pre-injected SSL chains, TCP BBR optimization, and dual-protocol support ( & ).
+- 🔁 **1-Click Server IP Migration**: Move nodes to new servers/IPs instantly with automated Cloudflare DNS updates and inventory sync.
+- ⚡ **Cloudflare DNS Center**:
+  - **Round-Robin Clean IPs**: Attach clean IPv4/IPv6 address pools to single or multiple subdomains.
+  - **Interactive TUI Table**: Multi-select, bulk comment editing, and batch subdomain renaming.
+  - **DNS Templates**: Ready-to-use subdomain presets for rapid scaling.
+- 💾 **Full Disaster Recovery**: 1-click database & SSL cert archiving with an instant temporary browser download server ().
+
+---
+
+### ⚡ Quick Install
+
+Run this one-liner on your **Master Server (Ubuntu 20.04/22.04/24.04)**:
 
 ```bash
-bash <(curl -fsSL [https://raw.githubusercontent.com/saeedsk32/pasarguard-deployer/main/install.sh](https://raw.githubusercontent.com/saeedsk32/pasarguard-deployer/main/install.sh))
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/saeedsk32/pasarguard-deployer/main/install.sh)"
+```
 
-پس از اتمام نصب، در هر مسیر از ترمینال تنها با تایپ دستور زیر منوی تعاملی اجرا می‌شود:
-
-Bash
+To launch the dashboard anytime:
+```bash
 pg-deploy
+```
 
-🌟 قابلیت‌های برجسته (Key Features)
-صدور هوشمند گواهی‌های Wildcard SSL:
+---
 
-دریافت گواهی از Let's Encrypt برای دامنه اصلی و کلیه ساب‌دامنه‌ها (*.domain.com).
+<div dir="rtl">
 
-اعتبارسنجی خودکار از طریق API کلودفلر (DNS Challenge) بدون نیاز به اشغال پورت ۸۰ یا خاموش کردن وب‌سرور/پنل.
+<h2 id="-راهنمای-فارسی">🇮🇷 راهنمای فارسی</h2>
 
-ساختار مسیردهی استاندارد در مستر و نودها:
+ابزار جامع، ماژولار و تعاملی تحت خط فرمان (TUI) توسعه‌داده‌شده توسط **سعید (saeedsk32)** جهت اتصال سریع نودها به پنل مستر پاسارگارد، مدیریت کامل DNS کلودفلر، گواهی‌های Wildcard و بازیابی اضطراری اطلاعات.
 
-انتقال و همگام‌سازی مستقیم در مسیر اختصاصی:
+### 🌟 قابلیت‌های برجسته
 
-مسیر گواهی: /etc/ssl/pasarguard/<domain>/fullchain.pem
+- 🔐 **صدور و اتصال خودکار گواهی Wildcard SSL**: صدور بدون نیاز به باز بودن پورت ۸۰ بر پایه Cloudflare DNS Plugin با پشتیبانی از زنجیره ISRG Root X1.
+- 🚀 **دیپلوی خودکار نودها**: هماهنگ با ابزار رسمی `pg-node`، فعال‌سازی کرنل BBR، و امکان انتخاب پروتکل `gRPC` (پیش‌فرض) یا `REST`.
+- 🔁 **مهاجرت آنی آی‌پی (1-Click IP Migration)**: تغییر آدرس آی‌پی سرور نود و آپدیت خودکار تمام رکوردهای ساب‌دامین در کلودفلر تنها با یک دستور.
+- ⚡ **مرکز مدیریت دی‌ان‌اس و آی‌پی‌های تمیز**:
+  - ثبت توزیع‌شده (Round-Robin) ده‌ها IP تمیز کلودفلر روی یک ساب‌دامین.
+  - جدول تعاملی با قابلیت انتخاب چندگانه (`all` یا شماره‌ای) جهت حذف، ویرایش کامنت و انتقال دسته‌جمعی ساب‌دامین‌ها.
+  - قالب‌های آماده (Presets) برای نام‌گذاری سریع رکوردها در هنگام نصب نود.
+- 💾 **مرکز بکاپ و ریستور**: آرشیو کامل پایگاه داده و گواهی‌ها به همراه **لینک مستقیم دانلود در مرورگر** روی پورت موقت `8088`.
 
-مسیر کلید خصوصی: /etc/ssl/pasarguard/<domain>/privkey.pem
+### 🏛️ معماری منوها
 
-حل ریشه‌ای معضل سیم‌لینک‌های لینوکس برای دسترسی روان کانتینرهای داکر نود.
+</div>
 
-اتوماسیون کامل پیکربندی نودها (Automated Provisioning):
+```text
+╭────────────────────────────────────────────────────────────────────────╮
+│  [1] 🚀 Node Management Center     Deploy, 1-Click Migrate, Inbounds   │
+│  [2] 🌐 Domains & SSL Manager      Certbot, Wildcards, Multi-SSL Sync  │
+│  [3] ⚡ Cloudflare DNS Center      Clean IPs Table, Presets Templates  │
+│  [4] 💾 Backup & Restore Center    1-Click Download Link & Recovery    │
+│  [5] 📋 Diagnostics & Log Trace    View Live Operations History        │
+╰────────────────────────────────────────────────────────────────────────╯
+```
 
-تنظیم نام هاست‌نیم اختصاصی جهت تفکیک دقیق در پنل.
+---
 
-فعال‌سازی الگوریتم شتاب‌دهنده هسته لینوکس TCP BBR.
+## 👨‍💻 Author
 
-به‌روزرسانی بسته‌های امنیتی سیستم‌عامل به‌صورت کاملاً بی‌صدا.
+- **Saeed SK**
+  - GitHub: [@saeedsk32](https://github.com/saeedsk32)
 
-باز کردن پورت‌های ارتباطی پاسارگارد (62050/tcp و 62051/tcp) در فایروال UFW.
+---
 
-امکان نصب خودکار بسته باینری نود پاسارگارد (pg-node).
+## 📄 License
 
-مدیریت داینامیک DNS کلودفلر:
-
-استعلام لحظه‌ای پیش از ثبت؛ تشخیص خودکار و ویرایش رکورد (Update) در صورت وجود، یا ایجاد رکورد جدید (Create).
-
-مرکز کنترل نودها و مدیریت پروفایل‌ها:
-
-ذخیره‌سازی محلی دیتابیس در فایل‌های سبک JSON (domains.json و nodes.json).
-
-مشاهده محتوای گواهی عمومی، ری‌استارت کانتینرها، تمدید یک‌کلیکه (1-Click SSL Sync) و ارتقای هسته نود از راه دور.
-
-🖥 نمای منوی مدیریت (CLI Preview)
-Plaintext
-+--------------------------------------------------------------------+
-|                PASARGUARD MULTI-NODE AUTO-DEPLOYER                 |
-+--------------------------------------------------------------------+
-
-  [1] Deploy New Node
-      > Configure remote node & transfer SSL to standard paths
-
-  [2] Issue Wildcard SSL Certificate
-      > Let's Encrypt wildcard via Cloudflare & sync to master
-
-  [3] Sync SSL to Local Master Server
-      > Deploy certificates to /etc/ssl/pasarguard/<domain> on Master
-
-  [4] Manage Saved Nodes
-      > Inspect SSL, view exact paths, restart & update nodes
-
-  [5] Domain Profiles Manager
-      > Add, edit, or delete domains, Cloudflare tokens and zone IDs
-
-  [6] Renew & Synchronize SSL
-      > Certbot renew & 1-click push to Master + all Nodes
-
-  [7] View Execution Logs
-      > Inspect real-time deployment history and reports
-
-  [8] Exit
-
-📋 نیازمندی‌ها و مشخصات فنی (Technical Specifications)مشخصه فنیشرح / مقدارسیستم‌عامل سازگارUbuntu 20.04 / 22.04 / 24.04 LTS, Debian 11 / 12زبان و پوستهPOSIX Bashپیش‌نیازهای نرم‌افزاریcurl, jq, sshpass, certbot, python3-certbot-dns-cloudflare (نصب خودکار)موتور ذخیره‌سازی محلیدیتابیس تخت JSON با کارایی بالاپورت‌های پیش‌فرض ارتباطیترافیک سرویس: 62050/tcp | ارتباط API: 62051/tcp
-
-📄 لایسنس (License)
-این پروژه تحت لایسنس MIT به صورت متن‌باز منتشر شده است.
-
+This project is licensed under the [MIT License](LICENSE) - Copyright (c) 2026 Saeed SK.
