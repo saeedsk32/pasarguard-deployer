@@ -2,7 +2,7 @@
 
 # ==============================================================================
 # PasarGuard Multi-Node Auto-Deployer
-# Modular Architecture: Nodes | Domains & SSL | Cloudflare DNS Center | Logs
+# Modular Architecture: Nodes | Domains & SSL | Cloudflare DNS | Backup & Logs
 # ==============================================================================
 
 set -o pipefail
@@ -12,6 +12,7 @@ APP_DIR="$(cd "$(dirname "$REAL_PATH")" && pwd)"
 DOMAINS_FILE="$APP_DIR/domains.json"
 NODES_FILE="$APP_DIR/nodes.json"
 PRESETS_FILE="$APP_DIR/dns_presets.json"
+BACKUP_DIR="$APP_DIR/backups"
 LOG_FILE="$APP_DIR/deployer.log"
 
 COLOR_RESET="\e[0m"
@@ -38,7 +39,7 @@ log() {
 
 install_base_tools() {
     local missing_pkgs=()
-    for pkg in jq sshpass curl certbot python3-certbot-dns-cloudflare; do
+    for pkg in jq sshpass curl certbot python3-certbot-dns-cloudflare tar; do
         if ! command -v "$pkg" >/dev/null 2>&1 && ! dpkg -s "$pkg" >/dev/null 2>&1; then
             missing_pkgs+=("$pkg")
         fi
@@ -56,6 +57,7 @@ init_db() {
     [ ! -f "$DOMAINS_FILE" ] && echo '[]' > "$DOMAINS_FILE"
     [ ! -f "$NODES_FILE" ] && echo '[]' > "$NODES_FILE"
     [ ! -f "$PRESETS_FILE" ] && echo '{"default": ["sub1", "cdn", "direct", "vpn"]}' > "$PRESETS_FILE"
+    mkdir -p "$BACKUP_DIR"
 }
 
 get_domains_count() {
@@ -708,63 +710,6 @@ node_management_menu() {
 # SECTION 2: DOMAINS & SSL MANAGEMENT
 # ==============================================================================
 
-renew_sync_all_ssl() {
-    echo -e "\n${COLOR_CYAN}--- Renew & Synchronize All SSL Certificates ---${COLOR_RESET}"
-    log INFO "Triggering Certbot renew on Master..."
-    sudo certbot renew --quiet || true
-
-    local count
-    count=$(get_domains_count)
-    if [ "$count" -eq 0 ]; then
-        log WARN "No domain profiles found."
-        return 0
-    fi
-
-    for i in $(seq 0 $((count - 1))); do
-        local dom
-        dom=$(jq -r ".[$i].domain" "$DOMAINS_FILE")
-        local cert="/etc/letsencrypt/live/$dom/fullchain.pem"
-        local key="/etc/letsencrypt/live/$dom/privkey.pem"
-
-        if [ -f "$cert" ] && [ -f "$key" ]; then
-            log INFO "Syncing renewed SSL to Master..."
-            sudo mkdir -p /var/lib/pasarguard/ssl /var/lib/pasarguard/certs /var/lib/pg-node/certs
-            local base_prefix="${dom%%.*}"
-            sudo cat "$cert" | sudo tee /var/lib/pasarguard/ssl/cert.pem "/var/lib/pasarguard/certs/$base_prefix.cer" /var/lib/pasarguard/certs/cert.pem /var/lib/pg-node/certs/ssl_cert.pem >/dev/null
-            sudo cat "$key" | sudo tee /var/lib/pasarguard/ssl/key.pem "/var/lib/pasarguard/certs/$base_prefix.key" /var/lib/pasarguard/certs/key.pem /var/lib/pg-node/certs/ssl_key.pem >/dev/null
-            sudo chmod 644 /var/lib/pasarguard/ssl/cert.pem /var/lib/pasarguard/certs/* /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || true
-            sudo chmod 600 /var/lib/pasarguard/ssl/key.pem /var/lib/pasarguard/certs/*.key /var/lib/pg-node/certs/ssl_key.pem 2>/dev/null || true
-            pasarguard restart 2>/dev/null || true
-
-            local node_count
-            node_count=$(jq '. | length' "$NODES_FILE")
-            for n in $(seq 0 $((node_count - 1))); do
-                local nbdom nip nport nuser npass
-                nbdom=$(jq -r ".[$n].base_domain" "$NODES_FILE")
-                nip=$(jq -r ".[$n].ip" "$NODES_FILE")
-                nport=$(jq -r ".[$n].ssh_port" "$NODES_FILE")
-                nuser=$(jq -r ".[$n].ssh_user" "$NODES_FILE")
-                npass=$(jq -r ".[$n].ssh_pass" "$NODES_FILE")
-
-                if [ "$nbdom" == "$dom" ]; then
-                    log INFO "Pushing renewed cert to node ($nip)..."
-                    cat "$cert" | sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no "$nuser@$nip" "cat > /var/lib/pg-node/certs/ssl_cert.pem && cat > /var/lib/pasarguard/ssl/cert.pem && chmod 644 /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pasarguard/ssl/cert.pem"
-                    cat "$key" | sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no "$nuser@$nip" "cat > /var/lib/pg-node/certs/ssl_key.pem && cat > /var/lib/pasarguard/ssl/key.pem && chmod 600 /var/lib/pg-node/certs/ssl_key.pem /var/lib/pasarguard/ssl/key.pem"
-                    sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no "$nuser@$nip" "export PATH=/usr/local/bin:\$PATH; pg-node restart -n 2>/dev/null || true"
-                fi
-
-                local is_sec
-                is_sec=$(jq -r --arg d "$dom" ".[$n].ssl_domains[]? | select(. == \$d)" "$NODES_FILE")
-                if [ -n "$is_sec" ] && [ "$dom" != "$nbdom" ]; then
-                    cat "$cert" | sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no "$nuser@$nip" "cat > /var/lib/pg-node/certs/$dom/fullchain.pem && chmod 644 /var/lib/pg-node/certs/$dom/fullchain.pem"
-                    cat "$key" | sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no "$nuser@$nip" "cat > /var/lib/pg-node/certs/$dom/privkey.pem && chmod 600 /var/lib/pg-node/certs/$dom/privkey.pem"
-                fi
-            done
-        fi
-    done
-    log OK "1-Click Renewal & sync complete across Master and all nodes."
-}
-
 domain_management_menu() {
     while true; do
         echo -e "\n${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
@@ -1057,6 +1002,104 @@ cloudflare_dns_center_menu() {
 }
 
 # ==============================================================================
+# SECTION 4: BACKUP & RESTORE MODULE
+# ==============================================================================
+
+create_full_backup() {
+    mkdir -p "$BACKUP_DIR"
+    local timestamp
+    timestamp="$(date '+%Y%m%d_%H%M%S')"
+    local backup_file="$BACKUP_DIR/pg_deploy_backup_${timestamp}.tar.gz"
+
+    log INFO "Creating full configuration and SSL backup archive..."
+    local backup_items=("$DOMAINS_FILE" "$NODES_FILE" "$PRESETS_FILE")
+    [ -d "/etc/letsencrypt" ] && backup_items+=("/etc/letsencrypt")
+    [ -d "/root/.secrets/certbot" ] && backup_items+=("/root/.secrets/certbot")
+    [ -d "/var/lib/pasarguard/certs" ] && backup_items+=("/var/lib/pasarguard/certs")
+    [ -d "/var/lib/pasarguard/ssl" ] && backup_items+=("/var/lib/pasarguard/ssl")
+
+    if sudo tar -czf "$backup_file" -P "${backup_items[@]}" 2>/dev/null; then
+        sudo chmod 600 "$backup_file"
+        log OK "Backup successfully created: $backup_file"
+        echo -e "\n${COLOR_GREEN}${COLOR_BOLD}✓ Complete Backup Created!${COLOR_RESET}"
+        echo -e "  ${COLOR_CYAN}File Path:${COLOR_RESET} $backup_file"
+        echo -e "  ${COLOR_CYAN}File Size:${COLOR_RESET} $(du -h "$backup_file" | awk '{print $1}')"
+    else
+        log ERROR "Failed to create backup archive."
+    fi
+}
+
+restore_full_backup() {
+    echo -e "\n${COLOR_CYAN}${COLOR_BOLD}--- Restore Configuration & SSLs ---${COLOR_RESET}"
+    local backups=($(ls -t "$BACKUP_DIR"/pg_deploy_backup_*.tar.gz 2>/dev/null || true))
+
+    if [ ${#backups[@]} -eq 0 ]; then
+        echo -e "${COLOR_YELLOW}No backup archives found in $BACKUP_DIR.${COLOR_RESET}"
+        read -rp "Enter full path to custom backup tar.gz file (or press Enter to cancel): " CUSTOM_BCK
+        [ -z "$CUSTOM_BCK" ] && return
+        if [ ! -f "$CUSTOM_BCK" ]; then
+            log ERROR "File $CUSTOM_BCK not found."
+            return
+        fi
+        local selected_archive="$CUSTOM_BCK"
+    else
+        echo -e "${COLOR_CYAN}Available Backup Archives:${COLOR_RESET}"
+        for i in "${!backups[@]}"; do
+            echo -e "  [$((i + 1))] $(basename "${backups[$i]}") - $(du -h "${backups[$i]}" | awk '{print $1}')"
+        done
+        read -rp "Select Backup [1-${#backups[@]}]: " B_IDX
+        if ! [[ "$B_IDX" =~ ^[0-9]+$ ]] || [ "$B_IDX" -lt 1 ] || [ "$B_IDX" -gt "${#backups[@]}" ]; then
+            log ERROR "Invalid selection."
+            return
+        fi
+        local selected_archive="${backups[$((B_IDX - 1))]}"
+    fi
+
+    echo -e "${COLOR_RED}${COLOR_BOLD}WARNING: Restoring will overwrite existing databases and Let's Encrypt keys!${COLOR_RESET}"
+    read -rp "Are you sure? Type 'yes' to proceed: " CONFIRM_RES
+    if [ "$CONFIRM_RES" == "yes" ]; then
+        log INFO "Extracting $selected_archive..."
+        sudo tar -xzf "$selected_archive" -P
+        
+        sudo chmod 644 "$DOMAINS_FILE" "$NODES_FILE" "$PRESETS_FILE" 2>/dev/null || true
+        sudo chmod -R 700 /root/.secrets/certbot 2>/dev/null || true
+        sudo chmod -R 600 /root/.secrets/certbot/* 2>/dev/null || true
+        sudo chmod -R 755 /etc/letsencrypt 2>/dev/null || true
+        
+        pasarguard restart 2>/dev/null || true
+        log OK "Restore completed and master panel services restarted."
+    else
+        echo "Restore cancelled."
+    fi
+}
+
+backup_restore_menu() {
+    while true; do
+        echo -e "\n${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
+        echo -e "${COLOR_CYAN}${COLOR_BOLD}|                   [4] BACKUP & RESTORE CENTER                      |${COLOR_RESET}"
+        echo -e "${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
+        echo -e "  [1] Create Complete Backup (Databases + SSL Certs + Cloudflare Configs)"
+        echo -e "  [2] Restore from Backup Archive"
+        echo -e "  [3] Quick JSON Database Print (Export Nodes & Domains)"
+        echo -e "  [0] Back to Main Menu"
+        read -rp "Select Option [0-3]: " BKP_OPT
+
+        case "$BKP_OPT" in
+            1) create_full_backup ;;
+            2) restore_full_backup ;;
+            3)
+                echo -e "\n${COLOR_CYAN}--- domains.json ---${COLOR_RESET}"
+                cat "$DOMAINS_FILE"
+                echo -e "\n${COLOR_CYAN}--- nodes.json ---${COLOR_RESET}"
+                cat "$NODES_FILE"
+                ;;
+            0) break ;;
+            *) echo "Invalid option." ;;
+        esac
+    done
+}
+
+# ==============================================================================
 # MAIN INTERFACE
 # ==============================================================================
 
@@ -1070,16 +1113,18 @@ while true; do
     echo -e "  ${COLOR_BOLD}[1] 🚀 Node Management Center${COLOR_RESET}     (Deploy, 1-Click Migrate, Inbounds)"
     echo -e "  ${COLOR_BOLD}[2] 🌐 Domains & SSL Manager${COLOR_RESET}      (Certbot, Wildcards, Multi-SSL Sync)"
     echo -e "  ${COLOR_BOLD}[3] ⚡ Cloudflare DNS Center${COLOR_RESET}      (Clean IPs Table, Presets Templates)"
-    echo -e "  ${COLOR_BOLD}[4] 📋 System Diagnostics & Logs${COLOR_RESET}  (Execution Trace & Health Status)"
+    echo -e "  ${COLOR_BOLD}[4] 💾 Backup & Restore Center${COLOR_RESET}    (Full Archive Export / 1-Click Import)"
+    echo -e "  ${COLOR_BOLD}[5] 📋 System Diagnostics & Logs${COLOR_RESET}  (Execution Trace & Health Status)"
     echo -e "  ${COLOR_BOLD}[0] 🚪 Exit${COLOR_RESET}"
     echo -e "${COLOR_CYAN}----------------------------------------------------------------------${COLOR_RESET}"
-    read -rp "Select Module [0-4]: " MAIN_CHOICE
+    read -rp "Select Module [0-5]: " MAIN_CHOICE
 
     case "$MAIN_CHOICE" in
         1) node_management_menu ;;
         2) domain_management_menu ;;
         3) cloudflare_dns_center_menu ;;
-        4) [ -f "$LOG_FILE" ] && tail -n 50 "$LOG_FILE" || echo "No logs found." ;;
+        4) backup_restore_menu ;;
+        5) [ -f "$LOG_FILE" ] && tail -n 50 "$LOG_FILE" || echo "No logs found." ;;
         0) echo "Goodbye!"; exit 0 ;;
         *) echo -e "${COLOR_RED}Invalid choice.${COLOR_RESET}" ;;
     esac
