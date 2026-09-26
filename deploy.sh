@@ -292,7 +292,7 @@ deploy_new_node() {
     NODE_SSH_PORT=${NODE_SSH_PORT:-22}
     read -rp "$(echo -e "  ${C_PURPLE}▶ SSH User [root]: ${RST}")" NODE_SSH_USER < /dev/tty
     NODE_SSH_USER=${NODE_SSH_USER:-root}
-    read -srp "$(echo -e "  ${C_PURPLE}▶ SSH Password (hidden): ${RST}")" NODE_SSH_PASS < /dev/tty
+    read -srp "$(echo -e "  ${C_PURPLE}▶ SSH Password: ${RST}")" NODE_SSH_PASS < /dev/tty
     echo ""
 
     # ۱. ساب‌دامین اتصال نود به پنل مستر (فقط به آی‌پی اصلی پوینت می‌شود)
@@ -416,6 +416,8 @@ deploy_new_node() {
     fi
 
     log INFO "Provisioning PasarGuard Node core on remote server..."
+    # پاکسازی ریشه‌ای فایل‌های قدیمی تا ارور node is already installed ندهد
+    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP"         "systemctl stop pg-node 2>/dev/null || true; rm -rf /opt/pg-node /usr/local/bin/pg-node /usr/bin/pg-node /etc/systemd/system/pg-node.service; systemctl daemon-reload 2>/dev/null || true"
     local generated_api_key
     generated_api_key=$(python3 -c "import uuid; print(uuid.uuid4())")
 
