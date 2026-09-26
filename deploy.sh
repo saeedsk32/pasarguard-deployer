@@ -3,7 +3,7 @@
 # ==============================================================================
 # PasarGuard Multi-Node Auto-Deployer
 # Pre-injects official Wildcard SSL & integrates natively with pg-node CLI
-# Supports: IPv4, IPv6 (AAAA), Cloudflare Comments, Multi-IP & DNS Templates
+# Supports: Dynamic IP Migration, IPv4/IPv6, Cloudflare Comments & Templates
 # ==============================================================================
 
 set -o pipefail
@@ -75,7 +75,6 @@ list_domain_profiles() {
     return 0
 }
 
-# هوشمندسازی مدیریت رکوردهای DNS (همراه با کامنت، تشخیص IPv4/IPv6 و مدیریت تکرار)
 upsert_cloudflare_dns() {
     local zone_id="$1"
     local token="$2"
@@ -88,23 +87,20 @@ upsert_cloudflare_dns() {
         rec_type="AAAA"
     fi
 
-    local query_res rec_id existing_ip
+    local query_res rec_id
     query_res=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?name=$record_name&type=$rec_type" \
          -H "Authorization: Bearer $token" \
          -H "Content-Type: application/json")
 
-    # بررسی تطابق با رکوردهای موجود
     rec_id=$(echo "$query_res" | jq -r --arg ip "$ip_address" '.result[]? | select(.content == $ip) | .id' | head -n 1)
 
     if [ -n "$rec_id" ]; then
-        # رکورد با همین IP وجود دارد -> فقط کامنت را بروزرسانی کن
         curl -s -X PATCH "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records/$rec_id" \
              -H "Authorization: Bearer $token" \
              -H "Content-Type: application/json" \
              --data "{\"comment\":\"$comment_text\"}" >/dev/null
-        log OK "DNS $rec_name ($rec_type) already active. Updated comment: [$comment_text]"
+        log OK "DNS $record_name ($rec_type) active. Comment updated: [$comment_text]"
     else
-        # ایجاد رکورد جدید (ایجاد رکورد با کامنت)
         local post_res
         post_res=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records" \
              -H "Authorization: Bearer $token" \
@@ -112,7 +108,7 @@ upsert_cloudflare_dns() {
              --data "{\"type\":\"$rec_type\",\"name\":\"$record_name\",\"content\":\"$ip_address\",\"ttl\":1,\"proxied\":false,\"comment\":\"$comment_text\"}")
 
         if echo "$post_res" | jq -e '.success' >/dev/null 2>&1; then
-            log OK "Created DNS: $record_name ($rec_type: $ip_address) | Comment: $comment_text"
+            log OK "Created DNS: $record_name ($rec_type: $ip_address) | $comment_text"
         else
             local err_msg
             err_msg=$(echo "$post_res" | jq -r '.errors[0].message // "Unknown error"')
@@ -201,14 +197,9 @@ deploy_new_node() {
     read -rp "Node Hostname (e.g. node-DE1): " NODE_NAME
     NODE_NAME=${NODE_NAME:-"node-DE1"}
     
-    # دریافت Primary IPv4
-    read -rp "Primary Server IPv4 (for SSH and Panel): " NODE_IP
-    
-    # دریافت اختیاری Server IPv6
+    read -rp "Primary Server IPv4 (SSH & Panel Connection): " NODE_IP
     read -rp "Server IPv6 (leave blank if none): " NODE_IPV6
     NODE_IPV6=$(echo "$NODE_IPV6" | tr -d ' ')
-
-    # دریافت سایر IPv4های اضافی
     read -rp "Additional IPv4s on this server (comma-separated, or Enter): " EXTRA_IPS
     
     read -rp "SSH Port [22]: " NODE_SSH_PORT
@@ -357,13 +348,11 @@ REMOTE_INIT
     local node_comment="PG-Node: $NODE_NAME | Main-IPv4"
     upsert_cloudflare_dns "$selected_zone" "$selected_token" "$full_hostname" "$NODE_IP" "$node_comment"
     
-    # رکوردهای اصلی در صورت وجود IPv6
     if [ -n "$NODE_IPV6" ]; then
         local node_v6_comment="PG-Node: $NODE_NAME | Main-IPv6"
         upsert_cloudflare_dns "$selected_zone" "$selected_token" "$full_hostname" "$NODE_IPV6" "$node_v6_comment"
     fi
 
-    # استخراج تمام IPهای در دسترس سرور
     local all_server_ips=("$NODE_IP")
     if [ -n "$EXTRA_IPS" ]; then
         IFS=',' read -ra E_IPS <<< "$EXTRA_IPS"
@@ -374,7 +363,6 @@ REMOTE_INIT
     fi
     [ -n "$NODE_IPV6" ] && all_server_ips+=("$NODE_IPV6")
 
-    # رکوردهای پیش‌فرض و سفارشی
     local all_extra_subs=("${preset_subs[@]}")
     if [ -n "$MANUAL_SUBS" ]; then
         IFS=',' read -ra M_ARR <<< "$MANUAL_SUBS"
@@ -384,9 +372,7 @@ REMOTE_INIT
         done
     fi
 
-    local created_dns_list=("$full_hostname ($NODE_IP)")
-    [ -n "$NODE_IPV6" ] && created_dns_list+=("$full_hostname ($NODE_IPV6)")
-
+    local created_dns_list=("$full_hostname")
     local ip_pool_idx=0
     for sub_item in "${all_extra_subs[@]}"; do
         if [ -n "$sub_item" ]; then
@@ -396,7 +382,7 @@ REMOTE_INIT
             local extra_full_sub="$sub_item.$selected_domain"
             local sub_comment="PG-Node: $NODE_NAME | Extra Subdomain: $sub_item"
             upsert_cloudflare_dns "$selected_zone" "$selected_token" "$extra_full_sub" "$target_sub_ip" "$sub_comment"
-            created_dns_list+=("$extra_full_sub ($target_sub_ip)")
+            created_dns_list+=("$extra_full_sub")
         fi
     done
 
@@ -488,6 +474,82 @@ REMOTE_INSTALL
     echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}\n"
 }
 
+# تابع تعویض و مهاجرت آی‌پی سرور
+migrate_node_ip() {
+    local n_idx="$1"
+    local old_ip target_port target_user target_pass target_host target_addr target_bdom
+    old_ip=$(jq -r ".[$n_idx].ip" "$NODES_FILE")
+    target_port=$(jq -r ".[$n_idx].ssh_port" "$NODES_FILE")
+    target_user=$(jq -r ".[$n_idx].ssh_user" "$NODES_FILE")
+    target_pass=$(jq -r ".[$n_idx].ssh_pass" "$NODES_FILE")
+    target_host=$(jq -r ".[$n_idx].hostname" "$NODES_FILE")
+    target_addr=$(jq -r ".[$n_idx].address" "$NODES_FILE")
+    target_bdom=$(jq -r ".[$n_idx].base_domain" "$NODES_FILE")
+
+    echo -e "\n${COLOR_CYAN}${COLOR_BOLD}--- Migrate / Change IP for Node: $target_host ---${COLOR_RESET}"
+    echo -e "Current Registered IP: ${COLOR_RED}$old_ip${COLOR_RESET}"
+    read -rp "Enter NEW Server IPv4: " NEW_IP
+    NEW_IP=$(echo "$NEW_IP" | tr -d ' ')
+    if [ -z "$NEW_IP" ]; then
+        log ERROR "New IP cannot be empty."
+        return 1
+    fi
+
+    read -rp "Keep current SSH Password? [Y/n]: " KEEP_PASS
+    KEEP_PASS=${KEEP_PASS:-Y}
+    if ! [[ "$KEEP_PASS" =~ ^[Yy]$ ]]; then
+        read -rsp "Enter new SSH Password: " target_pass
+        echo ""
+    fi
+
+    log INFO "Validating SSH connectivity on new IP: $NEW_IP:$target_port..."
+    if ! sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$target_user@$NEW_IP" "echo connected" >/dev/null 2>&1; then
+        log ERROR "Cannot connect to new IP via SSH. Please check IP and credentials."
+        return 1
+    fi
+    log OK "SSH connection confirmed on new IP."
+
+    local c_tok c_zid
+    c_tok=$(jq -r --arg bd "$target_bdom" '.[] | select(.domain == $bd) | .token' "$DOMAINS_FILE")
+    c_zid=$(jq -r --arg bd "$target_bdom" '.[] | select(.domain == $bd) | .zone_id' "$DOMAINS_FILE")
+
+    if [ -n "$c_tok" ] && [ -n "$c_zid" ]; then
+        log INFO "Migrating Cloudflare DNS records from $old_ip to $NEW_IP..."
+        
+        # بروزرسانی تک تک رکوردهای قبلی متعلق به این نود
+        while IFS= read -r dns_name; do
+            [ -z "$dns_name" ] && continue
+            local clean_name
+            clean_name=$(echo "$dns_name" | awk '{print $1}')
+            
+            # جستجوی آی‌دی رکورد متناظر با آی‌پی قدیم
+            local rec_id
+            rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?name=$clean_name&type=A" \
+                 -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" | jq -r --arg oip "$old_ip" '.result[]? | select(.content == $oip) | .id' | head -n 1)
+
+            local mig_comment="PG-Node: $target_host | Migrated to $NEW_IP at $(date '+%Y-%m-%d')"
+            if [ -n "$rec_id" ]; then
+                curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records/$rec_id" \
+                     -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" \
+                     --data "{\"type\":\"A\",\"name\":\"$clean_name\",\"content\":\"$NEW_IP\",\"ttl\":1,\"proxied\":false,\"comment\":\"$mig_comment\"}" >/dev/null
+                log OK "Cloudflare record $clean_name updated -> $NEW_IP"
+            else
+                upsert_cloudflare_dns "$c_zid" "$c_tok" "$clean_name" "$NEW_IP" "$mig_comment"
+            fi
+        done < <(jq -r ".[$n_idx].dns_records[]? // empty" "$NODES_FILE")
+    fi
+
+    # بروزرسانی دیتابیس محلی
+    local tmp_mig
+    tmp_mig=$(mktemp)
+    jq --arg idx "$n_idx" --arg nip "$NEW_IP" --arg pwd "$target_pass" \
+       '.[($idx|tonumber)].ip = $nip | .[($idx|tonumber)].ssh_pass = $pwd' "$NODES_FILE" > "$tmp_mig" && mv "$tmp_mig" "$NODES_FILE"
+
+    log OK "Node IP migration completed successfully!"
+    echo -e "\n${COLOR_GREEN}${COLOR_BOLD}✓ Node $target_host is now pointed to new IP: $NEW_IP${COLOR_RESET}"
+    echo -e "${COLOR_YELLOW}Note: No settings need to be changed in PasarGuard Panel because the Panel connects via domain ($target_addr) which now resolves to the new IP!${COLOR_RESET}\n"
+}
+
 manage_dns_presets() {
     while true; do
         echo -e "\n${COLOR_CYAN}${COLOR_BOLD}--- DNS Subdomain Presets Manager ---${COLOR_RESET}"
@@ -571,19 +633,20 @@ manage_saved_nodes() {
 
     echo -e "\nActions for node: $target_host - $target_ip"
     echo "  1) View Panel Connection Info (Address, Ports, Token and Full Card)"
-    echo "  2) Manage & Sync Multi-Domain SSLs (View/Inject Domain Certificates)"
-    echo "  3) Add Cloudflare DNS Record with Label Comment"
-    echo "  4) Switch Node Protocol (gRPC <-> REST)"
-    echo "  5) Manage Systemd Service (Install / Remove pg-node-service)"
-    echo "  6) Update / Change Xray-core (pg-node core-update)"
-    echo "  7) Update PasarGuard Node Software (pg-node update)"
-    echo "  8) Download / Update GeoFiles (pg-node geofiles)"
-    echo "  9) Restart PasarGuard Node (pg-node restart)"
-    echo "  10) View Live Node Logs (pg-node logs)"
-    echo "  11) Delete Node from Local Inventory Only"
-    echo "  12) Completely Uninstall Node from Server, Cloudflare & Inventory"
-    echo "  13) Cancel"
-    read -rp "Action [1-13]: " N_ACT
+    echo -e "  2) ${COLOR_GREEN}${COLOR_BOLD}Migrate / Change Server IP Address (Auto-update DNS & SSH)${COLOR_RESET}"
+    echo "  3) Manage & Sync Multi-Domain SSLs (View/Inject Domain Certificates)"
+    echo "  4) Add Cloudflare DNS Record with Label Comment"
+    echo "  5) Switch Node Protocol (gRPC <-> REST)"
+    echo "  6) Manage Systemd Service (Install / Remove pg-node-service)"
+    echo "  7) Update / Change Xray-core (pg-node core-update)"
+    echo "  8) Update PasarGuard Node Software (pg-node update)"
+    echo "  9) Download / Update GeoFiles (pg-node geofiles)"
+    echo "  10) Restart PasarGuard Node (pg-node restart)"
+    echo "  11) View Live Node Logs (pg-node logs)"
+    echo "  12) Delete Node from Local Inventory Only"
+    echo "  13) Completely Uninstall Node from Server, Cloudflare & Inventory"
+    echo "  14) Cancel"
+    read -rp "Action [1-14]: " N_ACT
 
     case "$N_ACT" in
         1)
@@ -620,6 +683,9 @@ manage_saved_nodes() {
             echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}\n"
             ;;
         2)
+            migrate_node_ip "$((N_IDX - 1))"
+            ;;
+        3)
             echo -e "\n${COLOR_CYAN}--- Manage & Sync Multi-Domain SSLs ---${COLOR_RESET}"
             list_domain_profiles
             local d_count
@@ -647,7 +713,7 @@ manage_saved_nodes() {
                 fi
             fi
             ;;
-        3)
+        4)
             echo -e "\n${COLOR_CYAN}--- Add Additional Cloudflare Subdomain DNS ---${COLOR_RESET}"
             read -rp "Enter new subdomain prefix (e.g. proxy2): " NEW_SUB
             NEW_SUB=$(echo "$NEW_SUB" | tr -d ' ')
@@ -665,13 +731,13 @@ manage_saved_nodes() {
                     
                     local tmp_dnsup
                     tmp_dnsup=$(mktemp)
-                    jq --arg idx "$((N_IDX - 1))" --arg nrec "$new_full_rec ($CHOSEN_IP)" \
+                    jq --arg idx "$((N_IDX - 1))" --arg nrec "$new_full_rec" \
                        '.[($idx|tonumber)].dns_records = ((.[($idx|tonumber)].dns_records // []) + [$nrec] | unique)' \
                        "$NODES_FILE" > "$tmp_dnsup" && mv "$tmp_dnsup" "$NODES_FILE"
                 fi
             fi
             ;;
-        4)
+        5)
             echo -e "\n${COLOR_CYAN}--- Switch Node Protocol ---${COLOR_RESET}"
             echo "  1) Use gRPC (Official Default)"
             echo "  2) Use REST"
@@ -692,7 +758,7 @@ manage_saved_nodes() {
                 log OK "Switched to REST protocol."
             fi
             ;;
-        5)
+        6)
             echo -e "\n${COLOR_CYAN}--- Manage Systemd Service ---${COLOR_RESET}"
             echo "  1) Install and Start pg-node-service (Systemd)"
             echo "  2) Remove pg-node-service (Systemd)"
@@ -705,7 +771,7 @@ manage_saved_nodes() {
                 log OK "Systemd service removed."
             fi
             ;;
-        6)
+        7)
             echo -e "\n${COLOR_CYAN}--- Update / Change Xray-core ---${COLOR_RESET}"
             read -rp "Enter Xray version (Press Enter for 'latest'): " X_VER
             X_VER=${X_VER:-latest}
@@ -713,32 +779,32 @@ manage_saved_nodes() {
             eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node core-update --version $X_VER'"
             log OK "Xray-core update dispatched."
             ;;
-        7)
+        8)
             log INFO "Updating PasarGuard Node software to latest..."
             eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node update -y'"
             log OK "Node updated successfully."
             ;;
-        8)
+        9)
             log INFO "Updating GeoFiles (GeoIP and GeoSite)..."
             eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node geofiles'"
             log OK "GeoFiles downloaded/updated."
             ;;
-        9)
+        10)
             log INFO "Restarting node service..."
             eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node restart -n 2>/dev/null || true'"
             log OK "Node service restarted."
             ;;
-        10)
+        11)
             log INFO "Streaming Node Logs (Press Ctrl+C to return)..."
             eval "$ssh_cmd -t 'export PATH=/usr/local/bin:\$PATH; pg-node logs'"
             ;;
-        11)
+        12)
             local tmp_d
             tmp_d=$(mktemp)
             jq "del(.[$((N_IDX - 1))])" "$NODES_FILE" > "$tmp_d" && mv "$tmp_d" "$NODES_FILE"
             log OK "Node removed from local inventory only."
             ;;
-        12)
+        13)
             echo -e "${COLOR_RED}${COLOR_BOLD}WARNING: This will completely destroy all PasarGuard node data, remove docker containers, delete certificates on $target_ip, clean up Cloudflare DNS, and delete the node profile!${COLOR_RESET}"
             read -rp "Are you absolutely sure? Type 'yes' to proceed: " CONFIRM_PURGE
             if [ "$CONFIRM_PURGE" == "yes" ]; then
@@ -758,16 +824,15 @@ REMOTE_UNINSTALL
                 if [ -n "$cf_tok" ] && [ -n "$cf_zid" ]; then
                     log INFO "Removing DNS records from Cloudflare..."
                     jq -r ".[$((N_IDX - 1))].dns_records[]? // empty" "$NODES_FILE" | while read -r r_to_del; do
-                        local clean_name clean_ip
+                        local clean_name
                         clean_name=$(echo "$r_to_del" | awk '{print $1}')
-                        clean_ip=$(echo "$r_to_del" | grep -oE '[0-9a-fA-F.:]{7,39}')
                         local rec_id
                         rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records?name=$clean_name" \
-                             -H "Authorization: Bearer $cf_tok" -H "Content-Type: application/json" | jq -r --arg ip "$clean_ip" '.result[]? | select(.content == $ip) | .id' | head -n 1)
+                             -H "Authorization: Bearer $cf_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty')
                         if [ -n "$rec_id" ]; then
                             curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records/$rec_id" \
                                  -H "Authorization: Bearer $cf_tok" -H "Content-Type: application/json" >/dev/null
-                            log OK "Deleted Cloudflare record: $clean_name -> $clean_ip"
+                            log OK "Deleted Cloudflare record: $clean_name"
                         fi
                     done
                 fi
@@ -852,10 +917,10 @@ while true; do
     echo -e "\n${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
     echo -e "${COLOR_CYAN}${COLOR_BOLD}|                PASARGUARD MULTI-NODE AUTO-DEPLOYER                 |${COLOR_RESET}"
     echo -e "${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
-    echo -e "  [1] Deploy New Node (IPv4/IPv6, Cloudflare Label Comments & Zero Error)"
+    echo -e "  [1] Deploy New Node (Multi-IP, DNS Presets & Zero Error)"
     echo -e "  [2] Issue Wildcard SSL Certificate (Let's Encrypt + Cloudflare)"
     echo -e "  [3] Sync SSL to Local Master Server"
-    echo -e "  [4] Manage Saved Nodes (Inspect, Multi-SSL, Cloudflare Records, Protocol)"
+    echo -e "  [4] Manage Saved Nodes (Inspect, IP Migration, Multi-SSL, Cloudflare Records)"
     echo -e "  [5] Domain Profiles Manager"
     echo -e "  [6] DNS Subdomain Presets Manager (Templates for new nodes)"
     echo -e "  [7] Renew & Synchronize All SSLs"
