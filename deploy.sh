@@ -372,9 +372,7 @@ REMOTE_INIT
         done
     fi
 
-    local created_dns_list=("$full_hostname ($NODE_IP)")
-    [ -n "$NODE_IPV6" ] && created_dns_list+=("$full_hostname ($NODE_IPV6)")
-
+    local created_dns_list=("$full_hostname")
     local ip_pool_idx=0
     for sub_item in "${all_extra_subs[@]}"; do
         if [ -n "$sub_item" ]; then
@@ -382,9 +380,9 @@ REMOTE_INIT
             ip_pool_idx=$(( (ip_pool_idx + 1) % ${#all_server_ips[@]} ))
 
             local extra_full_sub="$sub_item.$selected_domain"
-            local sub_comment="PG-Node: $NODE_NAME | Extra Subdomain: $sub_item"
+            local sub_comment="PG-Node: $NODE_NAME | Subdomain: $sub_item"
             upsert_cloudflare_dns "$selected_zone" "$selected_token" "$extra_full_sub" "$target_sub_ip" "$sub_comment"
-            created_dns_list+=("$extra_full_sub ($target_sub_ip)")
+            created_dns_list+=("$extra_full_sub")
         fi
     done
 
@@ -588,7 +586,7 @@ manage_dns_presets() {
 
 manage_clean_ips() {
     while true; do
-        echo -e "\n${COLOR_CYAN}${COLOR_BOLD}--- Cloudflare Clean IPs Manager ---${COLOR_RESET}"
+        echo -e "\n${COLOR_CYAN}${COLOR_BOLD}--- Cloudflare Clean IPs Manager (Round-Robin & Pruning) ---${COLOR_RESET}"
         if ! list_domain_profiles; then
             break
         fi
@@ -596,9 +594,11 @@ manage_clean_ips() {
         d_count=$(get_domains_count)
 
         echo ""
-        echo "  1) Mass Register Clean IPs into Cloudflare DNS"
-        echo "  2) Return to Main Menu"
-        read -rp "Select Option [1-2]: " CL_OPT
+        echo "  1) Add Multiple Clean IPs to a Single Subdomain (Round-Robin DNS)"
+        echo "  2) List All Clean IP Records from Cloudflare"
+        echo "  3) Selectively Delete Clean IP Records (by Subdomain or Tag)"
+        echo "  4) Return to Main Menu"
+        read -rp "Select Option [1-4]: " CL_OPT
 
         case "$CL_OPT" in
             1)
@@ -608,28 +608,108 @@ manage_clean_ips() {
                 c_tok=$(jq -r ".[$((C_DOM_IDX - 1))].token" "$DOMAINS_FILE")
                 c_zid=$(jq -r ".[$((C_DOM_IDX - 1))].zone_id" "$DOMAINS_FILE")
 
-                read -rp "Subdomain prefix for Clean IPs (e.g. 'clean' -> clean1.$c_dom): " PREFIX
-                PREFIX=${PREFIX:-"clean"}
-                read -rp "Operator / ISP Label for Comments (e.g. MCI / MTN / Irancell): " ISP_LABEL
-                ISP_LABEL=${ISP_LABEL:-"Clean IP Pool"}
+                echo -e "\n${COLOR_YELLOW}Enter the exact subdomain to attach all Clean IPs to (Round-Robin):${COLOR_RESET}"
+                echo -e "Example: '${COLOR_BOLD}cdn${COLOR_RESET}' will create multiple A records for '${COLOR_BOLD}cdn.$c_dom${COLOR_RESET}'"
+                read -rp "Subdomain prefix [cdn]: " PREFIX
+                PREFIX=${PREFIX:-"cdn"}
+                local full_target_sub="$PREFIX.$c_dom"
 
-                echo -e "${COLOR_YELLOW}Enter Clean IPs (comma-separated or paste multiple IPs):${COLOR_RESET}"
+                read -rp "Operator / ISP Label for Comments (e.g. MCI / MTN / Irancell): " ISP_LABEL
+                ISP_LABEL=${ISP_LABEL:-"Clean IP"}
+
+                echo -e "\n${COLOR_YELLOW}Paste multiple Clean IPs (comma-separated or space-separated):${COLOR_RESET}"
                 read -rp "IPs: " RAW_IPS
 
-                IFS=',' read -ra IP_LIST <<< "$RAW_IPS"
-                local idx=1
-                for cip in "${IP_LIST[@]}"; do
+                # تبدیل جداکننده‌ها به یک لیست استاندارد
+                local clean_ip_arr=($(echo "$RAW_IPS" | tr ',' ' ' | tr '\n' ' '))
+                local count_added=0
+
+                for cip in "${clean_ip_arr[@]}"; do
                     cip=$(echo "$cip" | tr -d ' \r\n')
                     if [[ "$cip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$cip" == *:* ]]; then
-                        local rec_name="${PREFIX}${idx}.${c_dom}"
-                        local c_comment="PG-CleanIP: $ISP_LABEL (#$idx) | Added $(date '+%Y-%m-%d')"
-                        upsert_cloudflare_dns "$c_zid" "$c_tok" "$rec_name" "$cip" "$c_comment"
-                        idx=$((idx + 1))
+                        local c_comment="PG-CleanIP: $ISP_LABEL | Added $(date '+%Y-%m-%d')"
+                        upsert_cloudflare_dns "$c_zid" "$c_tok" "$full_target_sub" "$cip" "$c_comment"
+                        count_added=$((count_added + 1))
                     fi
                 done
-                log OK "Clean IPs batch processing completed."
+                log OK "Successfully attached $count_added clean IPs to $full_target_sub"
                 ;;
+
             2)
+                read -rp "Select Domain Profile [1-$d_count]: " C_DOM_IDX
+                local c_dom c_tok c_zid
+                c_dom=$(jq -r ".[$((C_DOM_IDX - 1))].domain" "$DOMAINS_FILE")
+                c_tok=$(jq -r ".[$((C_DOM_IDX - 1))].token" "$DOMAINS_FILE")
+                c_zid=$(jq -r ".[$((C_DOM_IDX - 1))].zone_id" "$DOMAINS_FILE")
+
+                log INFO "Fetching Clean IP records from Cloudflare for $c_dom..."
+                local all_recs
+                all_recs=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?per_page=100" \
+                     -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json")
+
+                echo -e "\n${COLOR_CYAN}Current Clean IP Records (Tagged with PG-CleanIP):${COLOR_RESET}"
+                echo -e "--------------------------------------------------------------------------------"
+                echo "$all_recs" | jq -r '.result[]? | select(.comment != null and (.comment | contains("PG-CleanIP"))) | "ID: " + .id + " | " + .name + " (" + .type + ") -> " + .content + " | Comment: " + .comment'
+                echo -e "--------------------------------------------------------------------------------"
+                ;;
+
+            3)
+                read -rp "Select Domain Profile [1-$d_count]: " C_DOM_IDX
+                local c_dom c_tok c_zid
+                c_dom=$(jq -r ".[$((C_DOM_IDX - 1))].domain" "$DOMAINS_FILE")
+                c_tok=$(jq -r ".[$((C_DOM_IDX - 1))].token" "$DOMAINS_FILE")
+                c_zid=$(jq -r ".[$((C_DOM_IDX - 1))].zone_id" "$DOMAINS_FILE")
+
+                echo "  1) Delete by Exact Subdomain (e.g. remove all IPs under cdn.$c_dom)"
+                echo "  2) Delete a Specific IP address"
+                echo "  3) Cancel"
+                read -rp "Selection [1-3]: " DEL_WAY
+
+                if [ "$DEL_WAY" == "1" ]; then
+                    read -rp "Enter subdomain name to purge (e.g. cdn or cdn.$c_dom): " PURGE_SUB
+                    if [[ "$PURGE_SUB" != *"$c_dom"* ]]; then
+                        PURGE_SUB="$PURGE_SUB.$c_dom"
+                    fi
+
+                    log INFO "Searching records for $PURGE_SUB..."
+                    local query_del
+                    query_del=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?name=$PURGE_SUB" \
+                         -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json")
+
+                    local ids_to_del=($(echo "$query_del" | jq -r '.result[]?.id'))
+                    if [ ${#ids_to_del[@]} -eq 0 ]; then
+                        echo -e "${COLOR_YELLOW}No records found for $PURGE_SUB.${COLOR_RESET}"
+                    else
+                        echo -e "Found ${COLOR_RED}${#ids_to_del[@]}${COLOR_RESET} records for $PURGE_SUB. Deleting..."
+                        for did in "${ids_to_del[@]}"; do
+                            curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records/$did" \
+                                 -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" >/dev/null
+                        done
+                        log OK "All records under $PURGE_SUB purged."
+                    fi
+
+                elif [ "$DEL_WAY" == "2" ]; then
+                    read -rp "Enter specific IP to delete from Cloudflare: " PURGE_IP
+                    PURGE_IP=$(echo "$PURGE_IP" | tr -d ' ')
+                    local query_del
+                    query_del=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?content=$PURGE_IP" \
+                         -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json")
+
+                    local ids_to_del=($(echo "$query_del" | jq -r '.result[]?.id'))
+                    if [ ${#ids_to_del[@]} -eq 0 ]; then
+                        echo -e "${COLOR_YELLOW}No records found pointing to $PURGE_IP.${COLOR_RESET}"
+                    else
+                        echo -e "Deleting records matching $PURGE_IP..."
+                        for did in "${ids_to_del[@]}"; do
+                            curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records/$did" \
+                                 -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" >/dev/null
+                        done
+                        log OK "Deleted all records matching $PURGE_IP."
+                    fi
+                fi
+                ;;
+
+            4)
                 break
                 ;;
         esac
@@ -872,16 +952,15 @@ REMOTE_UNINSTALL
                 if [ -n "$cf_tok" ] && [ -n "$cf_zid" ]; then
                     log INFO "Removing DNS records from Cloudflare..."
                     jq -r ".[$((N_IDX - 1))].dns_records[]? // empty" "$NODES_FILE" | while read -r r_to_del; do
-                        local clean_name clean_ip
+                        local clean_name
                         clean_name=$(echo "$r_to_del" | awk '{print $1}')
-                        clean_ip=$(echo "$r_to_del" | grep -oE '[0-9a-fA-F.:]{7,39}')
                         local rec_id
                         rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records?name=$clean_name" \
-                             -H "Authorization: Bearer $cf_tok" -H "Content-Type: application/json" | jq -r --arg ip "$clean_ip" '.result[]? | select(.content == $ip) | .id' | head -n 1)
+                             -H "Authorization: Bearer $cf_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty')
                         if [ -n "$rec_id" ]; then
                             curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records/$rec_id" \
                                  -H "Authorization: Bearer $cf_tok" -H "Content-Type: application/json" >/dev/null
-                            log OK "Deleted Cloudflare record: $clean_name -> $clean_ip"
+                            log OK "Deleted Cloudflare record: $clean_name"
                         fi
                     done
                 fi
@@ -972,7 +1051,7 @@ while true; do
     echo -e "  [4] Manage Saved Nodes (Inspect, IP Migration, Multi-SSL, Cloudflare Records)"
     echo -e "  [5] Domain Profiles Manager"
     echo -e "  [6] DNS Subdomain Presets Manager (Templates for new nodes)"
-    echo -e "  [7] Cloudflare Clean IPs Manager (Mass DNS record generation)"
+    echo -e "  [7] Cloudflare Clean IPs Manager (Round-Robin & Pruning)"
     echo -e "  [8] Renew & Synchronize All SSLs"
     echo -e "  [9] View Execution Logs"
     echo -e "  [10] Exit"
