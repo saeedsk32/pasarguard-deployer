@@ -5,7 +5,7 @@
 # High-End Visual TUI | Multi-Node | Multi-IP | Clean IPs | Backup & Restore
 # ==============================================================================
 
-set -o pipefail
+# set -o pipefail
 
 REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 APP_DIR="$(cd "$(dirname "$REAL_PATH")" && pwd)"
