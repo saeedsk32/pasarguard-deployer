@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# PasarGuard Multi-Node Auto-Deployer (v6.3 - Unified Production Edition)
+# PasarGuard Multi-Node Auto-Deployer (v6.4 - Smart DNS & Modular Edition)
 # Developed by Saeed SK (@saeedsk32)
 # ==============================================================================
 
@@ -33,7 +33,7 @@ ui_banner() {
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██████╔╝██║  ███╗${RST}${BOLD}${C_PURPLE}██║  ██║█████╗  ██████╔╝██║     ██║   ██║ ╚████╔╝ ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██╔═══╝ ██║   ██║${RST}${BOLD}${C_PURPLE}██║  ██║██╔══╝  ██╔═══╝ ██║     ██║   ██║  ╚██╔╝  ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██║     ╚██████╔╝${RST}${BOLD}${C_PURPLE}██████╔╝███████╗██║     ███████╗╚██████╔╝   ██║   ${RST}   ${C_CYAN}│${RST}"
-    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v6.3 (Production)${RST}           ${C_CYAN}│${RST}"
+    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v6.4 (Production)${RST}           ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
 }
 
@@ -88,19 +88,19 @@ upsert_cloudflare_dns() {
     [[ "$ip" == *:* ]] && type="AAAA"
 
     local rec_id
-    rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zid/dns_records?name=$name" \
+    rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zid/dns_records?name=$name&type=$type&content=$ip" \
          -H "Authorization: Bearer $tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty' 2>/dev/null)
 
     if [ -n "$rec_id" ]; then
         curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$zid/dns_records/$rec_id" \
              -H "Authorization: Bearer $tok" -H "Content-Type: application/json" \
              --data "{\"type\":\"$type\",\"name\":\"$name\",\"content\":\"$ip\",\"ttl\":1,\"proxied\":false,\"comment\":\"$comment\"}" >/dev/null
-        log OK "Updated DNS Record: $name ($ip)"
+        log OK "DNS Record Verified: $name -> $ip"
     else
         curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$zid/dns_records" \
              -H "Authorization: Bearer $tok" -H "Content-Type: application/json" \
              --data "{\"type\":\"$type\",\"name\":\"$name\",\"content\":\"$ip\",\"ttl\":1,\"proxied\":false,\"comment\":\"$comment\"}" >/dev/null
-        log OK "Created DNS Record: $name ($ip)"
+        log OK "Created DNS Record: $name -> $ip [$comment]"
     fi
 }
 
@@ -118,7 +118,7 @@ toggle_node_bbr() {
     echo -e "    ${C_CYAN}[1]${RST} Enable BBR (fq + bbr)"
     echo -e "    ${C_CYAN}[2]${RST} Disable BBR (Revert to cubic)"
     echo -e "    ${C_GRAY}[0]${RST} Back"
-    read -rp "$(echo -e "\n  ${C_PURPLE}▶ Choose Action [0-2]: ${RST}")" BBR_ACT
+    read -rp "$(echo -e "\n  ${C_PURPLE}▶ Choose Action [0-2]: ${RST}")" BBR_ACT < /dev/tty
 
     case "$BBR_ACT" in
         1)
@@ -158,43 +158,49 @@ manage_node_dns_center() {
             echo ""
         fi
 
-        echo -e "    ${C_GREEN}[1]${RST} ➕ Add New Subdomain Record (Dedicated or Round-Robin)"
+        echo -e "    ${C_GREEN}[1]${RST} ➕ Add New Subdomain Record (Single IP or Multi-IP Pool)"
         echo -e "    ${C_YELLOW}[2]${RST} ✏️  Edit Target IP / Tag of an Existing Record"
         echo -e "    ${C_RED}[3]${RST} 🗑️  Delete a Record from Cloudflare & Local Inventory"
         echo -e "    ${C_GRAY}[0]${RST} 🔙 Back to Node Dashboard"
-        read -rp "$(echo -e "\n  ${C_PURPLE}▶ Choose DNS Action [0-3]: ${RST}")" DNS_ACT
+        read -rp "$(echo -e "\n  ${C_PURPLE}▶ Choose DNS Action [0-3]: ${RST}")" DNS_ACT < /dev/tty
 
         case "$DNS_ACT" in
             1)
-                read -rp "  ▶ Subdomain prefix (ex: pool1-1 or cdn): " NEW_SUB
-                read -rp "  ▶ Target IP Address: " NEW_IP
-                read -rp "  ▶ Cloudflare Comment Tag [RoundRobin]: " NEW_TAG
+                read -rp "  ▶ Subdomain prefix (ex: pool1-1 or cdn): " NEW_SUB < /dev/tty
+                read -rp "  ▶ Target IP(s) (comma-separated for Round-Robin): " NEW_IPS < /dev/tty
+                read -rp "  ▶ Cloudflare Comment Tag [RoundRobin]: " NEW_TAG < /dev/tty
                 NEW_TAG=${NEW_TAG:-RoundRobin}
-                if [ -n "$NEW_SUB" ] && [ -n "$NEW_IP" ]; then
+                if [ -n "$NEW_SUB" ] && [ -n "$NEW_IPS" ]; then
                     local target_fqdn="${NEW_SUB}.${t_bdom}"
-                    upsert_cloudflare_dns "$c_zid" "$c_tok" "$target_fqdn" "$NEW_IP" "PG-Node: $t_host | $NEW_TAG"
-                    local entry_str="$target_fqdn ($NEW_IP)"
-                    local tmp_f; tmp_f=$(mktemp)
-                    jq --arg n "$n_idx" --arg e "$entry_str" '.[($n|tonumber)].dns_records += [$e]' "$NODES_FILE" > "$tmp_f" && mv "$tmp_f" "$NODES_FILE"
-                    log OK "Added DNS Record $entry_str"
+                    IFS=',' read -ra IPS_TO_ADD <<< "$NEW_IPS"
+                    for raw_i in "${IPS_TO_ADD[@]}"; do
+                        local cl_ip; cl_ip=$(echo "$raw_i" | tr -d ' ')
+                        if [ -n "$cl_ip" ]; then
+                            upsert_cloudflare_dns "$c_zid" "$c_tok" "$target_fqdn" "$cl_ip" "PG-Node: $t_host | $NEW_TAG"
+                            local entry_str="$target_fqdn ($cl_ip)"
+                            local tmp_f; tmp_f=$(mktemp)
+                            jq --arg n "$n_idx" --arg e "$entry_str" '.[($n|tonumber)].dns_records += [$e]' "$NODES_FILE" > "$tmp_f" && mv "$tmp_f" "$NODES_FILE"
+                            log OK "Added DNS Record $entry_str"
+                        fi
+                    done
                 fi
                 read -rp "  Press [ENTER] to continue..." < /dev/tty
                 ;;
             2)
                 if [ ${#recs[@]} -gt 0 ]; then
-                    read -rp "  ▶ Select record number to edit [1-${#recs[@]}]: " R_EDIT
+                    read -rp "  ▶ Select record number to edit [1-${#recs[@]}]: " R_EDIT < /dev/tty
                     if [[ "$R_EDIT" =~ ^[0-9]+$ ]] && [ "$R_EDIT" -ge 1 ] && [ "$R_EDIT" -le "${#recs[@]}" ]; then
                         local chosen_entry="${recs[$((R_EDIT - 1))]}"
                         local fqdn curr_ip
                         fqdn=$(echo "$chosen_entry" | awk '{print $1}')
                         curr_ip=$(echo "$chosen_entry" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+')
-                        read -rp "  ▶ New IP Address [$curr_ip]: " NEW_R_IP
+                        read -rp "  ▶ New IP Address [$curr_ip]: " NEW_R_IP < /dev/tty
                         NEW_R_IP=${NEW_R_IP:-"$curr_ip"}
-                        read -rp "  ▶ New Comment tag: " NEW_R_TAG
+                        read -rp "  ▶ New Comment tag: " NEW_R_TAG < /dev/tty
                         NEW_R_TAG=${NEW_R_TAG:-"Custom"}
                         local full_comment="PG-Node: $t_host | $NEW_R_TAG"
                         local rec_id
-                        rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?name=$fqdn" \
+                        rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?name=$fqdn&content=$curr_ip" \
                              -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty' 2>/dev/null)
                         if [ -n "$rec_id" ]; then
                             local rtype="A"; [[ "$NEW_R_IP" == *:* ]] && rtype="AAAA"
@@ -213,17 +219,19 @@ manage_node_dns_center() {
                 ;;
             3)
                 if [ ${#recs[@]} -gt 0 ]; then
-                    read -rp "  ▶ Select record number to delete [1-${#recs[@]}]: " R_DEL
+                    read -rp "  ▶ Select record number to delete [1-${#recs[@]}]: " R_DEL < /dev/tty
                     if [[ "$R_DEL" =~ ^[0-9]+$ ]] && [ "$R_DEL" -ge 1 ] && [ "$R_DEL" -le "${#recs[@]}" ]; then
                         local del_entry="${recs[$((R_DEL - 1))]}"
-                        local del_fqdn; del_fqdn=$(echo "$del_entry" | awk '{print $1}')
+                        local del_fqdn del_ip
+                        del_fqdn=$(echo "$del_entry" | awk '{print $1}')
+                        del_ip=$(echo "$del_entry" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+')
                         local rec_id
-                        rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?name=$del_fqdn" \
+                        rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?name=$del_fqdn&content=$del_ip" \
                              -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty' 2>/dev/null)
                         [ -n "$rec_id" ] && curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records/$rec_id" -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" >/dev/null
                         local tmp_del; tmp_del=$(mktemp)
                         jq --arg n "$n_idx" --arg o "$del_entry" '.[($n|tonumber)].dns_records = [.[($n|tonumber)].dns_records[] | select(. != $o)]' "$NODES_FILE" > "$tmp_del" && mv "$tmp_del" "$NODES_FILE"
-                        log OK "Record $del_fqdn deleted."
+                        log OK "Record $del_fqdn ($del_ip) deleted."
                     fi
                 fi
                 read -rp "  Press [ENTER] to continue..." < /dev/tty
@@ -246,7 +254,7 @@ deploy_new_node() {
     fi
 
     list_domain_profiles
-    read -rp "$(echo -e "\n  ${C_PURPLE}▶ Select Main Domain Profile [1-$d_count]: ${RST}")" D_IDX
+    read -rp "$(echo -e "\n  ${C_PURPLE}▶ Select Main Domain Profile [1-$d_count]: ${RST}")" D_IDX < /dev/tty
     if ! [[ "$D_IDX" =~ ^[0-9]+$ ]] || [ "$D_IDX" -lt 1 ] || [ "$D_IDX" -gt "$d_count" ]; then
         log ERROR "Invalid domain selection."
         read -rp "Press [ENTER] to return..." < /dev/tty
@@ -259,26 +267,31 @@ deploy_new_node() {
     cf_token=$(jq -r ".[$dom_idx].token" "$DOMAINS_FILE")
     zone_id=$(jq -r ".[$dom_idx].zone_id" "$DOMAINS_FILE")
 
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Node Hostname (ex: de1): ${RST}")" NODE_HOST
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Node Name / Hostname (ex: node-DE1): ${RST}")" NODE_HOST < /dev/tty
     NODE_HOST=${NODE_HOST:-node1}
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Primary Server IPv4: ${RST}")" NODE_IP
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Server IPv6 (Optional): ${RST}")" NODE_IPV6
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Additional IPv4s (comma-separated - Optional): ${RST}")" EXTRA_IPS
-    read -rp "$(echo -e "  ${C_PURPLE}▶ SSH Port [22]: ${RST}")" NODE_SSH_PORT
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Primary Server IPv4 (Main IP): ${RST}")" NODE_IP < /dev/tty
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Additional IPv4s (comma-separated - Optional): ${RST}")" EXTRA_IPS < /dev/tty
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Server IPv6 (Optional): ${RST}")" NODE_IPV6 < /dev/tty
+    read -rp "$(echo -e "  ${C_PURPLE}▶ SSH Port [22]: ${RST}")" NODE_SSH_PORT < /dev/tty
     NODE_SSH_PORT=${NODE_SSH_PORT:-22}
-    read -rp "$(echo -e "  ${C_PURPLE}▶ SSH User [root]: ${RST}")" NODE_SSH_USER
+    read -rp "$(echo -e "  ${C_PURPLE}▶ SSH User [root]: ${RST}")" NODE_SSH_USER < /dev/tty
     NODE_SSH_USER=${NODE_SSH_USER:-root}
-    read -rp "$(echo -e "  ${C_PURPLE}▶ SSH Password: ${RST}")" NODE_SSH_PASS
+    read -rp "$(echo -e "  ${C_PURPLE}▶ SSH Password: ${RST}")" NODE_SSH_PASS < /dev/tty
 
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Subdomain prefix for node [ex: $NODE_HOST]: ${RST}")" SUB_PREFIX
+    # ۱. آدرس اتصال نود به پنل مستر (فقط به آی‌پی اصلی متصل می‌شود)
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Master Panel Subdomain for this node [ex: de1]: ${RST}")" SUB_PREFIX < /dev/tty
     SUB_PREFIX=${SUB_PREFIX:-$NODE_HOST}
     local fqdn="$SUB_PREFIX.$base_domain"
 
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Node Port (Service Port) [62050]: ${RST}")" NODE_PORT
+    # ۲. ساب‌دامین‌های فروش و Round-Robin
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Attach DNS Presets Templates (like pool1-1)? [Y/n]: ${RST}")" USE_PRESET < /dev/tty
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Extra Custom Subdomains (comma-separated, ex: vpn1, cdn - Optional): ${RST}")" EXTRA_CUSTOM_SUBS < /dev/tty
+
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Node Port (Service Port) [62050]: ${RST}")" NODE_PORT < /dev/tty
     NODE_PORT=${NODE_PORT:-62050}
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Advanced API Port [62051]: ${RST}")" API_PORT
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Advanced API Port [62051]: ${RST}")" API_PORT < /dev/tty
     API_PORT=${API_PORT:-62051}
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Protocol: [1] gRPC (Default) or [2] REST [1]: ${RST}")" PROTO_CHOICE
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Protocol: [1] gRPC (Default) or [2] REST [1]: ${RST}")" PROTO_CHOICE < /dev/tty
     local proto_flag="--use-grpc" proto_str="grpc"
     [ "$PROTO_CHOICE" == "2" ] && { proto_flag="--use-rest"; proto_str="rest"; }
 
@@ -304,7 +317,7 @@ deploy_new_node() {
     sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" "ln -sf /var/lib/pg-node/certs/$base_domain/fullchain.pem /var/lib/pg-node/certs/ssl_cert.pem && ln -sf /var/lib/pg-node/certs/$base_domain/privkey.pem /var/lib/pg-node/certs/ssl_key.pem"
     log OK "Primary Wildcard SSL transferred."
 
-    local dns_recs_array=()
+    # استخراج همه IPها
     local all_v4_ips=("$NODE_IP")
     if [ -n "$EXTRA_IPS" ]; then
         IFS=',' read -ra ADDRS <<< "$EXTRA_IPS"
@@ -314,11 +327,13 @@ deploy_new_node() {
         done
     fi
 
-    # رکورد اصلی نود
-    upsert_cloudflare_dns "$zone_id" "$cf_token" "$fqdn" "$NODE_IP" "PG-Node: $NODE_HOST | Main"
+    local dns_recs_array=()
+
+    # ۱. فقط ساب‌دامین اختصاصی نود به آی‌پی اصلی متصل می‌شود (بدون Round-Robin تا مستر همیشه مستقیم وصل شود)
+    upsert_cloudflare_dns "$zone_id" "$cf_token" "$fqdn" "$NODE_IP" "PG-Node: $NODE_HOST | Master-Link"
     dns_recs_array+=("$fqdn ($NODE_IP)")
 
-    # رکوردهای اختصاصی به ازای هر IP اضافه
+    # ۲. ساب‌دامین‌های اختصاصی برای هر IP اضافی
     local ip_counter=1
     for extra_ip in "${all_v4_ips[@]:1}"; do
         local extra_fqdn="${NODE_HOST}-${ip_counter}.${base_domain}"
@@ -327,18 +342,17 @@ deploy_new_node() {
         ((ip_counter++))
     done
 
-    # سوال برای ثبت IPv6
+    # ۳. ثبت IPv6 (در صورت تایید)
     if [ -n "$NODE_IPV6" ]; then
-        echo ""
-        read -rp "$(echo -e "  ${C_PURPLE}▶ Create Cloudflare AAAA DNS record for IPv6? [y/N]: ${RST}")" CONFIRM_V6 < /dev/tty
+        read -rp "$(echo -e "  ${C_PURPLE}▶ Create Cloudflare AAAA DNS record for IPv6 on $fqdn? [y/N]: ${RST}")" CONFIRM_V6 < /dev/tty
         if [[ "$CONFIRM_V6" =~ ^[yY]$ ]]; then
             upsert_cloudflare_dns "$zone_id" "$cf_token" "$fqdn" "$NODE_IPV6" "PG-Node: $NODE_HOST | IPv6"
             dns_recs_array+=("$fqdn ($NODE_IPV6)")
         fi
     fi
 
-    # اتصال Round-Robin واقعی برای رکوردهای تمپلیت (pool)
-    if [ -f "$PRESETS_FILE" ]; then
+    # ۴. اعمال ساب‌دامین‌های پرکاربرد تمپلیت (Pool) به صورت Round-Robin واقعی روی تمام آی‌پی‌ها
+    if [[ ! "$USE_PRESET" =~ ^[nN]$ ]] && [ -f "$PRESETS_FILE" ]; then
         local p_subs
         p_subs=$(jq -r '.main[]? // empty' "$PRESETS_FILE" 2>/dev/null)
         for ps in $p_subs; do
@@ -350,13 +364,30 @@ deploy_new_node() {
         done
     fi
 
+    # ۵. اعمال ساب‌دامین‌های سفارشی کاربر به صورت Round-Robin روی تمام IPها
+    if [ -n "$EXTRA_CUSTOM_SUBS" ]; then
+        IFS=',' read -ra CSUBS <<< "$EXTRA_CUSTOM_SUBS"
+        for cs in "${CSUBS[@]}"; do
+            local clean_cs; clean_cs=$(echo "$cs" | tr -d ' ')
+            if [ -n "$clean_cs" ]; then
+                local c_fqdn="${clean_cs}.${base_domain}"
+                for v4 in "${all_v4_ips[@]}"; do
+                    upsert_cloudflare_dns "$zone_id" "$cf_token" "$c_fqdn" "$v4" "PG-Node: $NODE_HOST | Custom-RR"
+                    dns_recs_array+=("$c_fqdn ($v4)")
+                done
+            fi
+        done
+    fi
+
     log INFO "Provisioning PasarGuard Node core using official script..."
     sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" \
         "sudo bash -c \"\$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)\" @ install $proto_flag --service-port $NODE_PORT --api-port $API_PORT --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem -y >/dev/null 2>&1"
 
     sleep 3
+    # استخراج توکن از مسیرهای احتمالی فایل .env یا کانفیگ سرویس
     local token_extracted
-    token_extracted=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" "grep -oE '[0-9a-fA-F-]{36}' /opt/pg-node/.env 2>/dev/null | head -n 1" 2>/dev/null || echo "")
+    token_extracted=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" \
+        "grep -oE '[0-9a-fA-F-]{36}' /opt/pg-node/.env 2>/dev/null || grep -oE '[0-9a-fA-F-]{36}' /etc/systemd/system/pg-node.service 2>/dev/null | head -n 1" 2>/dev/null || echo "")
 
     local node_json_entry
     node_json_entry=$(jq -n \
@@ -411,8 +442,8 @@ manage_saved_nodes() {
         target_pass=$(jq -r ".[$idx_pos].ssh_pass // \"\"" "$NODES_FILE" 2>/dev/null)
         target_host=$(jq -r ".[$idx_pos].hostname // \"node\"" "$NODES_FILE" 2>/dev/null)
         target_addr=$(jq -r ".[$idx_pos].address // \"\"" "$NODES_FILE" 2>/dev/null)
-        target_sport=$(jq -r ".[$idx_pos].service_port // 62051" "$NODES_FILE" 2>/dev/null)
-        target_aport=$(jq -r ".[$idx_pos].api_port // 62050" "$NODES_FILE" 2>/dev/null)
+        target_sport=$(jq -r ".[$idx_pos].service_port // 62050" "$NODES_FILE" 2>/dev/null)
+        target_aport=$(jq -r ".[$idx_pos].api_port // 62051" "$NODES_FILE" 2>/dev/null)
         target_token=$(jq -r ".[$idx_pos].api_token // \"\"" "$NODES_FILE" 2>/dev/null)
         target_proto=$(jq -r ".[$idx_pos].protocol // \"grpc\"" "$NODES_FILE" 2>/dev/null)
         target_bdom=$(jq -r ".[$idx_pos].base_domain // \"\"" "$NODES_FILE" 2>/dev/null)
@@ -442,7 +473,19 @@ manage_saved_nodes() {
                 panel_status="${C_YELLOW}○ Standby / Checking${RST}"
             fi
 
-            # خواندن گواهی برگشتی
+            # تلاش مجدد برای خواندن توکن در صورت خالی بودن
+            if [ -z "$target_token" ] || [ "$target_token" == "Not detected" ]; then
+                local live_tok
+                live_tok=$(sshpass -p "$target_pass" ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 "$target_user@$target_ip" \
+                    "grep -oE '[0-9a-fA-F-]{36}' /opt/pg-node/.env 2>/dev/null || grep -oE '[0-9a-fA-F-]{36}' /etc/systemd/system/pg-node.service 2>/dev/null | head -n 1" 2>/dev/null)
+                if [ -n "$live_tok" ]; then
+                    target_token="$live_tok"
+                    local tmp_tk; tmp_tk=$(mktemp)
+                    jq --arg n "$idx_pos" --arg k "$live_tok" '.[($n|tonumber)].api_token = $k' "$NODES_FILE" > "$tmp_tk" && mv "$tmp_tk" "$NODES_FILE"
+                fi
+            fi
+
+            # خواندن گواهی
             local _remote_cert _leaf_cert
             _remote_cert=$(sshpass -p "$target_pass" ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 "$target_user@$target_ip" "cat /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || cat /var/lib/pasarguard/ssl/cert.pem 2>/dev/null" 2>/dev/null || true)
             if [ -n "$_remote_cert" ]; then
@@ -451,7 +494,7 @@ manage_saved_nodes() {
                 _leaf_cert="(Certificate not found on remote node)"
             fi
 
-            # نمایش مستقیم کارت بلافاصله پس از ورود
+            # کارت کامل اتصال پنل
             echo -e "  ${C_GREEN}╭────────────────────────────────────────────────────────────────────────╮${RST}"
             echo -e "  ${C_GREEN}│         PASARGUARD PANEL CONNECTION DETAILS                            │${RST}"
             echo -e "  ${C_GREEN}├────────────────────────────────────────────────────────────────────────┤${RST}"
@@ -462,7 +505,7 @@ manage_saved_nodes() {
             printf "  ${C_GREEN}│${RST}  Connection Type      : %-46s ${C_GREEN}│${RST}\n" "${target_proto^^}"
             printf "  ${C_GREEN}│${RST}  Panel Service Link   : %-55b ${C_GREEN}│${RST}\n" "$panel_status"
             printf "  ${C_GREEN}│${RST}  TCP BBR Engine       : %-55b ${C_GREEN}│${RST}\n" "$bbr_status"
-            printf "  ${C_GREEN}│${RST}  API Key              : %-46s ${C_GREEN}│${RST}\n" "${target_token:-Not found}"
+            printf "  ${C_GREEN}│${RST}  API Key              : %-46s ${C_GREEN}│${RST}\n" "${target_token:-Not detected}"
             echo -e "  ${C_GREEN}├────────────────────────────────────────────────────────────────────────┤${RST}"
             echo -e "  ${C_GREEN}│  Cloudflare DNS Records:                                               │${RST}"
             while IFS= read -r drec; do
@@ -489,6 +532,8 @@ manage_saved_nodes() {
             echo -e "    ${C_GREEN}[9]${RST}  📦 Update / Change Xray-core"
             echo -e "    ${C_GREEN}[10]${RST} 🔄 Update PasarGuard Node Software"
             echo -e "    ${C_GREEN}[11]${RST} 🗺️  Update GeoFiles (GeoIP & GeoSite)"
+            echo -e "    ${C_GREEN}[14]${RST} 🔑 Set / Regenerate Node API Key"
+            echo -e "    ${C_GREEN}[15]${RST} 🔌 Reconfigure Ports (Service & API)"
 
             echo -e "\n  ${BOLD}${C_RED}🗑️  DELETION & CLEANUP:${RST}"
             echo -e "    ${C_GRAY}[12]${RST} 🗑️  Delete from Local Inventory Only"
@@ -573,19 +618,12 @@ manage_saved_nodes() {
                     log OK "GeoFiles updated on remote node."
                     read -rp "  Press [ENTER] to continue..." < /dev/tty
                     ;;
-                12)
-                    local tmp_d; tmp_d=$(mktemp)
-                    jq "del(.[$idx_pos])" "$NODES_FILE" > "$tmp_d" && mv "$tmp_d" "$NODES_FILE"
-                    log OK "Node removed from local inventory."
-                    read -rp "  Press [ENTER] to continue..." < /dev/tty
-                    break
-                    ;;
                 14)
                     read -rp "  ▶ Enter New API Key (Leave empty to auto-generate UUID): " NEW_MANUAL_KEY < /dev/tty
                     if [ -z "$NEW_MANUAL_KEY" ]; then
                         NEW_MANUAL_KEY=$(python3 -c "import uuid; print(uuid.uuid4())")
                     fi
-                    eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; sed -i "s/^API_KEY=.*/API_KEY=$NEW_MANUAL_KEY/" /opt/pg-node/.env 2>/dev/null || true; pg-node restart -n 2>/dev/null || true'"
+                    eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; sed -i \"s/^API_KEY=.*/API_KEY=$NEW_MANUAL_KEY/\" /opt/pg-node/.env 2>/dev/null || true; pg-node restart -n 2>/dev/null || true'"
                     local tmp_k; tmp_k=$(mktemp)
                     jq --arg n "$idx_pos" --arg k "$NEW_MANUAL_KEY" '.[($n|tonumber)].api_token = $k' "$NODES_FILE" > "$tmp_k" && mv "$tmp_k" "$NODES_FILE"
                     target_token="$NEW_MANUAL_KEY"
@@ -598,13 +636,20 @@ manage_saved_nodes() {
                     read -rp "  ▶ New API Port [$target_aport]: " NEW_APORT < /dev/tty
                     NEW_APORT=${NEW_APORT:-$target_aport}
                     
-                    eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; sed -i "s/^SERVICE_PORT=.*/SERVICE_PORT=$NEW_SPORT/" /opt/pg-node/.env 2>/dev/null || true; sed -i "s/^API_PORT=.*/API_PORT=$NEW_APORT/" /opt/pg-node/.env 2>/dev/null || true; ufw allow $NEW_SPORT/tcp >/dev/null 2>&1; ufw allow $NEW_APORT/tcp >/dev/null 2>&1; pg-node restart -n 2>/dev/null || true'"
+                    eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; sed -i \"s/^SERVICE_PORT=.*/SERVICE_PORT=$NEW_SPORT/\" /opt/pg-node/.env 2>/dev/null || true; sed -i \"s/^API_PORT=.*/API_PORT=$NEW_APORT/\" /opt/pg-node/.env 2>/dev/null || true; ufw allow $NEW_SPORT/tcp >/dev/null 2>&1; ufw allow $NEW_APORT/tcp >/dev/null 2>&1; pg-node restart -n 2>/dev/null || true'"
                     local tmp_po; tmp_po=$(mktemp)
                     jq --arg n "$idx_pos" --arg sp "$NEW_SPORT" --arg ap "$NEW_APORT" '.[($n|tonumber)].service_port = ($sp|tonumber) | .[($n|tonumber)].api_port = ($ap|tonumber)' "$NODES_FILE" > "$tmp_po" && mv "$tmp_po" "$NODES_FILE"
                     target_sport="$NEW_SPORT"
                     target_aport="$NEW_APORT"
                     log OK "Ports updated: Service Port = $NEW_SPORT | API Port = $NEW_APORT"
                     read -rp "  Press [ENTER] to continue..." < /dev/tty
+                    ;;
+                12)
+                    local tmp_d; tmp_d=$(mktemp)
+                    jq "del(.[$idx_pos])" "$NODES_FILE" > "$tmp_d" && mv "$tmp_d" "$NODES_FILE"
+                    log OK "Node removed from local inventory."
+                    read -rp "  Press [ENTER] to continue..." < /dev/tty
+                    break
                     ;;
                 13)
                     read -rp "  Type 'yes' to completely uninstall node and clean DNS: " PURGE_C < /dev/tty
