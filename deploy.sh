@@ -59,6 +59,14 @@ log() {
 }
 
 init_db() {
+
+if [ -f "$PRESETS_FILE" ]; then
+    if jq -e 'has("main") and has("pool_main")' "$PRESETS_FILE" >/dev/null 2>&1; then
+        tmp_clean=$(mktemp)
+        jq 'del(.main)' "$PRESETS_FILE" > "$tmp_clean" && mv "$tmp_clean" "$PRESETS_FILE"
+    fi
+fi
+
     [ ! -f "$DOMAINS_FILE" ] && echo '[]' > "$DOMAINS_FILE"
     [ ! -f "$NODES_FILE" ] && echo '[]' > "$NODES_FILE"
     if [ ! -f "$PRESETS_FILE" ] || [ "$(cat "$PRESETS_FILE")" == "{}" ]; then
@@ -505,26 +513,67 @@ cloudflare_dns_center() {
                 read -rp "Press [ENTER] to return..." < /dev/tty
                 ;;
             2)
-                echo -e "\n  ${BOLD}${C_CYAN}Current DNS Presets Templates:${RST}"
-                cat "$PRESETS_FILE"
-                read -rp "$(echo -e "\n  ${C_PURPLE}Do you want to add/edit a preset? [y/N]: ${RST}")" ADD_P < /dev/tty
-                if [[ "$ADD_P" =~ ^[yY]$ ]]; then
-                    read -rp "Preset Name (ex: pool_main): " P_NAME < /dev/tty
-                    read -rp "Subdomains (comma-separated, ex: pool1-1, cdn): " P_SUBS < /dev/tty
-                    if [ -n "$P_NAME" ] && [ -n "$P_SUBS" ]; then
-                        IFS=',' read -ra S_LIST <<< "$P_SUBS"
-                        local json_array="["
-                        for s in "${S_LIST[@]}"; do
-                            local cs; cs=$(echo "$s" | tr -d ' ')
-                            json_array+="\"$cs\","
+                while true; do
+                    ui_sub_banner
+                    echo -e "  ${BOLD}${C_CYAN}📋 DNS PRESETS TEMPLATES MANAGEMENT${RST}
+"
+                    local p_keys=()
+                    while IFS= read -r k; do [ -n "$k" ] && p_keys+=("$k"); done < <(jq -r 'keys[]' "$PRESETS_FILE" 2>/dev/null)
+
+                    if [ ${#p_keys[@]} -eq 0 ]; then
+                        echo -e "  ${C_YELLOW}No presets defined yet.${RST}
+"
+                    else
+                        echo -e "  ${C_PURPLE}Saved Templates:${RST}"
+                        for i in "${!p_keys[@]}"; do
+                            local pk="${p_keys[$i]}"
+                            local sub_list
+                            sub_list=$(jq -r --arg k "$pk" '.[$k] | join(", ")' "$PRESETS_FILE" 2>/dev/null)
+                            echo -e "    ${C_CYAN}[$((i + 1))]${RST} ${BOLD}$pk${RST} -> [${C_GREEN}$sub_list${RST}]"
                         done
-                        json_array="${json_array%,}]"
-                        local tmp_p; tmp_p=$(mktemp)
-                        jq --arg p "$P_NAME" --argjson subs "$json_array" '.[$p] = $subs' "$PRESETS_FILE" > "$tmp_p" && mv "$tmp_p" "$PRESETS_FILE"
-                        log OK "Preset '$P_NAME' saved."
+                        echo ""
                     fi
-                fi
-                read -rp "Press [ENTER] to return..." < /dev/tty
+
+                    echo -e "    ${C_GREEN}[1]${RST} ➕ Add / Update a Preset Template"
+                    echo -e "    ${C_RED}[2]${RST} 🗑️  Delete a Preset Template"
+                    echo -e "    ${C_GRAY}[0]${RST} 🔙 Back"
+                    read -rp "$(echo -e "
+  ${C_PURPLE}▶ Select Option [0-2]: ${RST}")" P_SUB_OPT < /dev/tty
+
+                    case "$P_SUB_OPT" in
+                        1)
+                            read -rp "  ▶ Preset Name (ex: pool_main): " NEW_P_NAME < /dev/tty
+                            read -rp "  ▶ Subdomain prefixes (comma-separated, ex: pool1-1, direct): " NEW_P_SUBS < /dev/tty
+                            if [ -n "$NEW_P_NAME" ] && [ -n "$NEW_P_SUBS" ]; then
+                                IFS=',' read -ra SL <<< "$NEW_P_SUBS"
+                                local json_arr="["
+                                for item in "${SL[@]}"; do
+                                    local c_item; c_item=$(echo "$item" | tr -d ' ')
+                                    [ -n "$c_item" ] && json_arr+="\"$c_item\","
+                                done
+                                json_arr="${json_arr%,}]"
+                                local tmp_pr; tmp_pr=$(mktemp)
+                                jq --arg k "$NEW_P_NAME" --argjson arr "$json_arr" '.[$k] = $arr' "$PRESETS_FILE" > "$tmp_pr" && mv "$tmp_pr" "$PRESETS_FILE"
+                                log OK "Preset '$NEW_P_NAME' saved successfully."
+                            fi
+                            read -rp "  Press [ENTER] to continue..." < /dev/tty
+                            ;;
+                        2)
+                            if [ ${#p_keys[@]} -gt 0 ]; then
+                                read -rp "  ▶ Select preset number to delete [1-${#p_keys[@]}]: " DEL_P_IDX < /dev/tty
+                                if [[ "$DEL_P_IDX" =~ ^[0-9]+$ ]] && [ "$DEL_P_IDX" -ge 1 ] && [ "$DEL_P_IDX" -le "${#p_keys[@]}" ]; then
+                                    local chosen_pk="${p_keys[$((DEL_P_IDX - 1))]}"
+                                    local tmp_del; tmp_del=$(mktemp)
+                                    jq --arg k "$chosen_pk" 'del(.[$k])' "$PRESETS_FILE" > "$tmp_del" && mv "$tmp_del" "$PRESETS_FILE"
+                                    log OK "Preset '$chosen_pk' deleted."
+                                fi
+                            fi
+                            read -rp "  Press [ENTER] to continue..." < /dev/tty
+                            ;;
+                        0) break ;;
+                        *) ;;
+                    esac
+                done
                 ;;
             0) break ;;
             *) ;;
