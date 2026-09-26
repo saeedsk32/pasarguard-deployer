@@ -32,7 +32,7 @@ BG_PRIMARY="\e[48;5;236m"
 BG_BLUE="\e[48;5;24m"
 
 ui_banner() {
-    clear 2>/dev/null || true
+    # clear
     echo -e "${C_CYAN}╭────────────────────────────────────────────────────────────────────────╮${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██████╗  ██████╗${RST} ${BOLD}${C_PURPLE}██████╗ ███████╗██████╗ ██╗      ██████╗ ██╗   ██╗${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██╔══██╗██╔════╝${RST} ${BOLD}${C_PURPLE}██╔══██╗██╔════╝██╔══██╗██║     ██╔═══██╗╚██╗ ██╔╝${RST}   ${C_CYAN}│${RST}"
