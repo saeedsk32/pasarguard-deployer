@@ -39,7 +39,7 @@ log() {
 
 install_base_tools() {
     local missing_pkgs=()
-    for pkg in jq sshpass curl certbot python3-certbot-dns-cloudflare tar; do
+    for pkg in jq sshpass curl certbot python3-certbot-dns-cloudflare tar python3; do
         if ! command -v "$pkg" >/dev/null 2>&1 && ! dpkg -s "$pkg" >/dev/null 2>&1; then
             missing_pkgs+=("$pkg")
         fi
@@ -707,54 +707,6 @@ node_management_menu() {
 }
 
 # ==============================================================================
-# SECTION 2: DOMAINS & SSL MANAGEMENT
-# ==============================================================================
-
-domain_management_menu() {
-    while true; do
-        echo -e "\n${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
-        echo -e "${COLOR_CYAN}${COLOR_BOLD}|                   [2] DOMAINS & SSL MANAGER                        |${COLOR_RESET}"
-        echo -e "${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
-        echo -e "  [1] Issue New Wildcard SSL Certificate (Let's Encrypt + Cloudflare)"
-        echo -e "  [2] Sync Existing Domain SSL to Local Master Web Panel"
-        echo -e "  [3] Renew & Synchronize All SSLs (Master + All Nodes)"
-        echo -e "  [4] List & Delete Registered Domain Profiles"
-        echo -e "  [0] Back to Main Menu"
-        read -rp "Select Option [0-4]: " DM_OPT
-        case "$DM_OPT" in
-            1) issue_wildcard_ssl ;;
-            2)
-                list_domain_profiles && {
-                    read -rp "Select Domain Index: " D_IDX
-                    D_SEL=$(jq -r ".[$((D_IDX - 1))].domain" "$DOMAINS_FILE")
-                    sudo mkdir -p /var/lib/pasarguard/ssl /var/lib/pasarguard/certs /var/lib/pg-node/certs
-                    base_name="${D_SEL%%.*}"
-                    sudo cat "/etc/letsencrypt/live/$D_SEL/fullchain.pem" | sudo tee /var/lib/pasarguard/ssl/cert.pem /var/lib/pasarguard/certs/"$base_name".cer /var/lib/pasarguard/certs/cert.pem /var/lib/pg-node/certs/ssl_cert.pem >/dev/null
-                    sudo cat "/etc/letsencrypt/live/$D_SEL/privkey.pem" | sudo tee /var/lib/pasarguard/ssl/key.pem /var/lib/pasarguard/certs/"$base_name".key /var/lib/pasarguard/certs/key.pem /var/lib/pg-node/certs/ssl_key.pem >/dev/null
-                    sudo chmod 644 /var/lib/pasarguard/ssl/cert.pem /var/lib/pasarguard/certs/*.cer /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || true
-                    sudo chmod 600 /var/lib/pasarguard/ssl/key.pem /var/lib/pasarguard/certs/*.key /var/lib/pg-node/certs/ssl_key.pem 2>/dev/null || true
-                    pasarguard restart 2>/dev/null || docker compose -f /opt/pasarguard/docker-compose.yml restart 2>/dev/null || true
-                    log OK "Master SSL synced and PasarGuard web panel restarted."
-                }
-                ;;
-            3) renew_sync_all_ssl ;;
-            4)
-                list_domain_profiles || true
-                read -rp "Enter Profile Index to Delete (or press Enter to cancel): " DEL_I
-                if [[ "$DEL_I" =~ ^[0-9]+$ ]]; then
-                    local tmp_m
-                    tmp_m=$(mktemp)
-                    jq "del(.[$((DEL_I - 1))])" "$DOMAINS_FILE" > "$tmp_m" && mv "$tmp_m" "$DOMAINS_FILE"
-                    log OK "Profile deleted."
-                fi
-                ;;
-            0) break ;;
-            *) echo "Invalid option." ;;
-        esac
-    done
-}
-
-# ==============================================================================
 # SECTION 3: CLOUDFLARE DNS CENTER (CLEAN IPS & PRESETS)
 # ==============================================================================
 
@@ -1002,14 +954,15 @@ cloudflare_dns_center_menu() {
 }
 
 # ==============================================================================
-# SECTION 4: BACKUP & RESTORE MODULE
+# SECTION 4: BACKUP & RESTORE MODULE (WITH INSTANT DOWNLOAD LINK)
 # ==============================================================================
 
 create_full_backup() {
     mkdir -p "$BACKUP_DIR"
     local timestamp
     timestamp="$(date '+%Y%m%d_%H%M%S')"
-    local backup_file="$BACKUP_DIR/pg_deploy_backup_${timestamp}.tar.gz"
+    local backup_name="pg_deploy_backup_${timestamp}.tar.gz"
+    local backup_file="$BACKUP_DIR/$backup_name"
 
     log INFO "Creating full configuration and SSL backup archive..."
     local backup_items=("$DOMAINS_FILE" "$NODES_FILE" "$PRESETS_FILE")
@@ -1019,11 +972,41 @@ create_full_backup() {
     [ -d "/var/lib/pasarguard/ssl" ] && backup_items+=("/var/lib/pasarguard/ssl")
 
     if sudo tar -czf "$backup_file" -P "${backup_items[@]}" 2>/dev/null; then
-        sudo chmod 600 "$backup_file"
+        sudo chmod 644 "$backup_file"
         log OK "Backup successfully created: $backup_file"
-        echo -e "\n${COLOR_GREEN}${COLOR_BOLD}✓ Complete Backup Created!${COLOR_RESET}"
-        echo -e "  ${COLOR_CYAN}File Path:${COLOR_RESET} $backup_file"
-        echo -e "  ${COLOR_CYAN}File Size:${COLOR_RESET} $(du -h "$backup_file" | awk '{print $1}')"
+        
+        # تشخیص IP سرور مستر
+        local srv_ip
+        srv_ip=$(curl -s -4 --max-time 3 ifconfig.io 2>/dev/null || hostname -I | awk '{print $1}')
+        local dl_port=8088
+
+        echo -e "\n${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
+        echo -e "${COLOR_GREEN}${COLOR_BOLD}                 FULL BACKUP COMPLETED                      ${COLOR_RESET}"
+        echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}"
+        echo -e "  ${COLOR_BOLD}File Name:${COLOR_RESET}     $backup_name"
+        echo -e "  ${COLOR_BOLD}Local Path:${COLOR_RESET}    $backup_file"
+        echo -e "  ${COLOR_BOLD}File Size:${COLOR_RESET}     $(du -h "$backup_file" | awk '{print $1}')"
+        echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
+        echo -e "  ${COLOR_BOLD}Direct Download Link:${COLOR_RESET}"
+        echo -e "  ${COLOR_YELLOW}${COLOR_BOLD}http://$srv_ip:$dl_port/$backup_name${COLOR_RESET}"
+        echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
+        echo -e "${COLOR_YELLOW}Opening temporary secure web server on port $dl_port...${COLOR_RESET}"
+        echo -e "${COLOR_WHITE}Download the file using your browser. Once finished, press [ENTER] to stop the server.${COLOR_RESET}"
+
+        # باز کردن موقت فایروال
+        sudo ufw allow $dl_port/tcp >/dev/null 2>&1 || true
+
+        # اجرای وب‌سرور موقت پایتون در پس‌زمینه
+        (cd "$BACKUP_DIR" && python3 -m http.server $dl_port >/dev/null 2>&1) &
+        local srv_pid=$!
+
+        read -rp "Press [ENTER] to terminate download server and close port $dl_port: "
+        
+        # خاموش کردن سرور و بستن فایروال
+        kill "$srv_pid" 2>/dev/null || true
+        sudo ufw delete allow $dl_port/tcp >/dev/null 2>&1 || true
+        sudo chmod 600 "$backup_file"
+        log OK "Temporary download server closed."
     else
         log ERROR "Failed to create backup archive."
     fi
@@ -1078,7 +1061,7 @@ backup_restore_menu() {
         echo -e "\n${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
         echo -e "${COLOR_CYAN}${COLOR_BOLD}|                   [4] BACKUP & RESTORE CENTER                      |${COLOR_RESET}"
         echo -e "${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
-        echo -e "  [1] Create Complete Backup (Databases + SSL Certs + Cloudflare Configs)"
+        echo -e "  [1] Create Complete Backup (Generate Instant Browser Download Link)"
         echo -e "  [2] Restore from Backup Archive"
         echo -e "  [3] Quick JSON Database Print (Export Nodes & Domains)"
         echo -e "  [0] Back to Main Menu"
@@ -1113,7 +1096,7 @@ while true; do
     echo -e "  ${COLOR_BOLD}[1] 🚀 Node Management Center${COLOR_RESET}     (Deploy, 1-Click Migrate, Inbounds)"
     echo -e "  ${COLOR_BOLD}[2] 🌐 Domains & SSL Manager${COLOR_RESET}      (Certbot, Wildcards, Multi-SSL Sync)"
     echo -e "  ${COLOR_BOLD}[3] ⚡ Cloudflare DNS Center${COLOR_RESET}      (Clean IPs Table, Presets Templates)"
-    echo -e "  ${COLOR_BOLD}[4] 💾 Backup & Restore Center${COLOR_RESET}    (Full Archive Export / 1-Click Import)"
+    echo -e "  ${COLOR_BOLD}[4] 💾 Backup & Restore Center${COLOR_RESET}    (1-Click Download Link & Restore)"
     echo -e "  ${COLOR_BOLD}[5] 📋 System Diagnostics & Logs${COLOR_RESET}  (Execution Trace & Health Status)"
     echo -e "  ${COLOR_BOLD}[0] 🚪 Exit${COLOR_RESET}"
     echo -e "${COLOR_CYAN}----------------------------------------------------------------------${COLOR_RESET}"
