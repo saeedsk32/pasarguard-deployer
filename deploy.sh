@@ -31,6 +31,13 @@ C_GRAY="\e[38;5;244m"
 BG_PRIMARY="\e[48;5;236m"
 BG_BLUE="\e[48;5;24m"
 
+ui_sub_banner() {
+    clear 2>/dev/null || true
+    echo -e "${C_CYAN}┌────────────────────────────────────────────────────────────────────────┐${RST}"
+    echo -e "${C_CYAN}│${RST} ${BOLD}${C_BLUE}PasarGuard Deployer${RST} ${C_GRAY}│ By Saeed SK (@saeedsk32) │${RST} ${C_GREEN}Active${RST}                     ${C_CYAN}│${RST}"
+    echo -e "${C_CYAN}└────────────────────────────────────────────────────────────────────────┘${RST}"
+}
+
 ui_banner() {
     # clear
     echo -e "${C_CYAN}╭────────────────────────────────────────────────────────────────────────╮${RST}"
@@ -39,7 +46,7 @@ ui_banner() {
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██████╔╝██║  ███╗${RST}${BOLD}${C_PURPLE}██║  ██║█████╗  ██████╔╝██║     ██║   ██║ ╚████╔╝ ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██╔═══╝ ██║   ██║${RST}${BOLD}${C_PURPLE}██║  ██║██╔══╝  ██╔═══╝ ██║     ██║   ██║  ╚██╔╝  ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██║     ╚██████╔╝${RST}${BOLD}${C_PURPLE}██████╔╝███████╗██║     ███████╗╚██████╔╝   ██║   ${RST}   ${C_CYAN}│${RST}"
-    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps & Multi-Node Orchestration Engine v5.4${RST}         ${C_CYAN}│${RST}"
+    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v6.1 (Production)${RST}         ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
 }
 
@@ -540,6 +547,7 @@ manage_saved_nodes() {
     echo -e "    ${C_CYAN}[10]${RST} ♻️  Restart Node Service"
     echo -e "    ${C_CYAN}[11]${RST} 📜 Follow Live Node Logs (Ctrl+C to exit)"
     echo -e "    ${C_YELLOW}[12]${RST} 🗑️  Delete from Local Inventory Only"
+    echo -e "    ${C_CYAN}[14]${RST} 🌐 Add Live Round-Robin DNS Record for this Node"
     echo -e "    ${C_RED}[13]${RST} 💣 Completely Uninstall Node & Clean DNS"
     echo -e "    ${C_GRAY}[0]${RST}  Back"
     read -rp "$(echo -e "\n  ${C_PURPLE}▶ Choose Action [0-13]: ${RST}")" N_ACT
@@ -678,7 +686,7 @@ manage_saved_nodes() {
 
 node_management_menu() {
     while true; do
-        ui_banner
+        ui_sub_banner
         echo -e "  ${BOLD}${C_CYAN}MODULE 1: NODE MANAGEMENT${RST}"
         echo -e "  ${C_GRAY}Deploy, configure and orchestrate PasarGuard remote nodes${RST}\n"
         echo -e "  ${C_CYAN}[1]${RST} 🚀 Deploy New Node ${C_GRAY}(Multi-IP, Multi-SSL & Presets)${RST}"
