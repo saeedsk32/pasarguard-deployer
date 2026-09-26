@@ -3,7 +3,7 @@
 # ==============================================================================
 # PasarGuard Multi-Node Auto-Deployer
 # Pre-injects official Wildcard SSL & integrates natively with pg-node CLI
-# Supports: Dynamic IP Migration, IPv4/IPv6, Cloudflare Comments & Templates
+# Supports: Dynamic IP Migration, IPv4/IPv6, Clean IPs, Multi-SSL & Templates
 # ==============================================================================
 
 set -o pipefail
@@ -372,7 +372,9 @@ REMOTE_INIT
         done
     fi
 
-    local created_dns_list=("$full_hostname")
+    local created_dns_list=("$full_hostname ($NODE_IP)")
+    [ -n "$NODE_IPV6" ] && created_dns_list+=("$full_hostname ($NODE_IPV6)")
+
     local ip_pool_idx=0
     for sub_item in "${all_extra_subs[@]}"; do
         if [ -n "$sub_item" ]; then
@@ -382,7 +384,7 @@ REMOTE_INIT
             local extra_full_sub="$sub_item.$selected_domain"
             local sub_comment="PG-Node: $NODE_NAME | Extra Subdomain: $sub_item"
             upsert_cloudflare_dns "$selected_zone" "$selected_token" "$extra_full_sub" "$target_sub_ip" "$sub_comment"
-            created_dns_list+=("$extra_full_sub")
+            created_dns_list+=("$extra_full_sub ($target_sub_ip)")
         fi
     done
 
@@ -474,7 +476,6 @@ REMOTE_INSTALL
     echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}\n"
 }
 
-# تابع تعویض و مهاجرت آی‌پی سرور
 migrate_node_ip() {
     local n_idx="$1"
     local old_ip target_port target_user target_pass target_host target_addr target_bdom
@@ -516,13 +517,11 @@ migrate_node_ip() {
     if [ -n "$c_tok" ] && [ -n "$c_zid" ]; then
         log INFO "Migrating Cloudflare DNS records from $old_ip to $NEW_IP..."
         
-        # بروزرسانی تک تک رکوردهای قبلی متعلق به این نود
         while IFS= read -r dns_name; do
             [ -z "$dns_name" ] && continue
             local clean_name
             clean_name=$(echo "$dns_name" | awk '{print $1}')
             
-            # جستجوی آی‌دی رکورد متناظر با آی‌پی قدیم
             local rec_id
             rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?name=$clean_name&type=A" \
                  -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" | jq -r --arg oip "$old_ip" '.result[]? | select(.content == $oip) | .id' | head -n 1)
@@ -539,7 +538,6 @@ migrate_node_ip() {
         done < <(jq -r ".[$n_idx].dns_records[]? // empty" "$NODES_FILE")
     fi
 
-    # بروزرسانی دیتابیس محلی
     local tmp_mig
     tmp_mig=$(mktemp)
     jq --arg idx "$n_idx" --arg nip "$NEW_IP" --arg pwd "$target_pass" \
@@ -582,6 +580,56 @@ manage_dns_presets() {
                 log OK "Preset '$PNAME_DEL' deleted."
                 ;;
             3)
+                break
+                ;;
+        esac
+    done
+}
+
+manage_clean_ips() {
+    while true; do
+        echo -e "\n${COLOR_CYAN}${COLOR_BOLD}--- Cloudflare Clean IPs Manager ---${COLOR_RESET}"
+        if ! list_domain_profiles; then
+            break
+        fi
+        local d_count
+        d_count=$(get_domains_count)
+
+        echo ""
+        echo "  1) Mass Register Clean IPs into Cloudflare DNS"
+        echo "  2) Return to Main Menu"
+        read -rp "Select Option [1-2]: " CL_OPT
+
+        case "$CL_OPT" in
+            1)
+                read -rp "Select Target Domain Profile [1-$d_count]: " C_DOM_IDX
+                local c_dom c_tok c_zid
+                c_dom=$(jq -r ".[$((C_DOM_IDX - 1))].domain" "$DOMAINS_FILE")
+                c_tok=$(jq -r ".[$((C_DOM_IDX - 1))].token" "$DOMAINS_FILE")
+                c_zid=$(jq -r ".[$((C_DOM_IDX - 1))].zone_id" "$DOMAINS_FILE")
+
+                read -rp "Subdomain prefix for Clean IPs (e.g. 'clean' -> clean1.$c_dom): " PREFIX
+                PREFIX=${PREFIX:-"clean"}
+                read -rp "Operator / ISP Label for Comments (e.g. MCI / MTN / Irancell): " ISP_LABEL
+                ISP_LABEL=${ISP_LABEL:-"Clean IP Pool"}
+
+                echo -e "${COLOR_YELLOW}Enter Clean IPs (comma-separated or paste multiple IPs):${COLOR_RESET}"
+                read -rp "IPs: " RAW_IPS
+
+                IFS=',' read -ra IP_LIST <<< "$RAW_IPS"
+                local idx=1
+                for cip in "${IP_LIST[@]}"; do
+                    cip=$(echo "$cip" | tr -d ' \r\n')
+                    if [[ "$cip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$cip" == *:* ]]; then
+                        local rec_name="${PREFIX}${idx}.${c_dom}"
+                        local c_comment="PG-CleanIP: $ISP_LABEL (#$idx) | Added $(date '+%Y-%m-%d')"
+                        upsert_cloudflare_dns "$c_zid" "$c_tok" "$rec_name" "$cip" "$c_comment"
+                        idx=$((idx + 1))
+                    fi
+                done
+                log OK "Clean IPs batch processing completed."
+                ;;
+            2)
                 break
                 ;;
         esac
@@ -731,7 +779,7 @@ manage_saved_nodes() {
                     
                     local tmp_dnsup
                     tmp_dnsup=$(mktemp)
-                    jq --arg idx "$((N_IDX - 1))" --arg nrec "$new_full_rec" \
+                    jq --arg idx "$((N_IDX - 1))" --arg nrec "$new_full_rec ($CHOSEN_IP)" \
                        '.[($idx|tonumber)].dns_records = ((.[($idx|tonumber)].dns_records // []) + [$nrec] | unique)' \
                        "$NODES_FILE" > "$tmp_dnsup" && mv "$tmp_dnsup" "$NODES_FILE"
                 fi
@@ -824,15 +872,16 @@ REMOTE_UNINSTALL
                 if [ -n "$cf_tok" ] && [ -n "$cf_zid" ]; then
                     log INFO "Removing DNS records from Cloudflare..."
                     jq -r ".[$((N_IDX - 1))].dns_records[]? // empty" "$NODES_FILE" | while read -r r_to_del; do
-                        local clean_name
+                        local clean_name clean_ip
                         clean_name=$(echo "$r_to_del" | awk '{print $1}')
+                        clean_ip=$(echo "$r_to_del" | grep -oE '[0-9a-fA-F.:]{7,39}')
                         local rec_id
                         rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records?name=$clean_name" \
-                             -H "Authorization: Bearer $cf_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty')
+                             -H "Authorization: Bearer $cf_tok" -H "Content-Type: application/json" | jq -r --arg ip "$clean_ip" '.result[]? | select(.content == $ip) | .id' | head -n 1)
                         if [ -n "$rec_id" ]; then
                             curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records/$rec_id" \
                                  -H "Authorization: Bearer $cf_tok" -H "Content-Type: application/json" >/dev/null
-                            log OK "Deleted Cloudflare record: $clean_name"
+                            log OK "Deleted Cloudflare record: $clean_name -> $clean_ip"
                         fi
                     done
                 fi
@@ -923,11 +972,12 @@ while true; do
     echo -e "  [4] Manage Saved Nodes (Inspect, IP Migration, Multi-SSL, Cloudflare Records)"
     echo -e "  [5] Domain Profiles Manager"
     echo -e "  [6] DNS Subdomain Presets Manager (Templates for new nodes)"
-    echo -e "  [7] Renew & Synchronize All SSLs"
-    echo -e "  [8] View Execution Logs"
-    echo -e "  [9] Exit"
+    echo -e "  [7] Cloudflare Clean IPs Manager (Mass DNS record generation)"
+    echo -e "  [8] Renew & Synchronize All SSLs"
+    echo -e "  [9] View Execution Logs"
+    echo -e "  [10] Exit"
     echo ""
-    read -rp "Select an option [1-9]: " OPTION
+    read -rp "Select an option [1-10]: " OPTION
 
     case "$OPTION" in
         1) deploy_new_node ;;
@@ -961,9 +1011,10 @@ while true; do
            fi
            ;;
         6) manage_dns_presets ;;
-        7) renew_sync_all_ssl ;;
-        8) [ -f "$LOG_FILE" ] && tail -n 50 "$LOG_FILE" || echo "No logs found." ;;
-        9) echo "Goodbye!"; exit 0 ;;
+        7) manage_clean_ips ;;
+        8) renew_sync_all_ssl ;;
+        9) [ -f "$LOG_FILE" ] && tail -n 50 "$LOG_FILE" || echo "No logs found." ;;
+        10) echo "Goodbye!"; exit 0 ;;
         *) echo -e "${COLOR_RED}Invalid option.${COLOR_RESET}" ;;
     esac
 done
