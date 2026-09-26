@@ -241,12 +241,18 @@ deploy_new_node() {
 
     if [ ! -f "$cert_src" ] || [ ! -f "$key_src" ]; then
         log ERROR "Certificates not found for $selected_domain in Let's Encrypt store."
+        read -rp ""n ${C_PURPLE}Press [ENTER] to return to menu... ${RST}""
         return 1
     fi
 
     log INFO "Verifying SSH connection to $NODE_IP:$NODE_SSH_PORT..."
-    if ! sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$NODE_SSH_USER@$NODE_IP" "echo connected" >/dev/null 2>&1; then
-        log ERROR "Cannot connect via SSH. Verify IP, port, and credentials."
+    local ssh_err
+    ssh_err=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 "$NODE_SSH_USER@$NODE_IP" "echo connected" 2>&1)
+    if [[ $? -ne 0 ]]; then
+        log ERROR "Cannot connect via SSH to $NODE_IP:$NODE_SSH_PORT"
+        echo -e "  ${C_RED}Raw SSH Error:${RST} ${DIM}$ssh_err${RST}"
+        echo -e "  ${C_YELLOW}Check:${RST} 1) Is server IP correct? 2) Is SSH password valid? 3) Is port 22 open?"
+        read -rp ""n ${C_PURPLE}Press [ENTER] to return to menu... ${RST}""
         return 1
     fi
     log OK "SSH connection established."
