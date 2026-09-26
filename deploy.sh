@@ -3,6 +3,7 @@
 # ==============================================================================
 # PasarGuard Multi-Node Auto-Deployer
 # Pre-injects official Wildcard SSL & integrates natively with pg-node CLI
+# Supports: Multi-IP, DNS Presets, Multi-SSL, Clean IPs Management
 # ==============================================================================
 
 set -o pipefail
@@ -11,6 +12,8 @@ REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 APP_DIR="$(cd "$(dirname "$REAL_PATH")" && pwd)"
 DOMAINS_FILE="$APP_DIR/domains.json"
 NODES_FILE="$APP_DIR/nodes.json"
+PRESETS_FILE="$APP_DIR/dns_presets.json"
+CLEAN_IPS_FILE="$APP_DIR/clean_ips.json"
 LOG_FILE="$APP_DIR/deployer.log"
 
 COLOR_RESET="\e[0m"
@@ -54,6 +57,8 @@ install_base_tools() {
 init_db() {
     [ ! -f "$DOMAINS_FILE" ] && echo '[]' > "$DOMAINS_FILE"
     [ ! -f "$NODES_FILE" ] && echo '[]' > "$NODES_FILE"
+    [ ! -f "$PRESETS_FILE" ] && echo '{"default": ["sub1", "cdn", "direct", "vpn"]}' > "$PRESETS_FILE"
+    [ ! -f "$CLEAN_IPS_FILE" ] && echo '[]' > "$CLEAN_IPS_FILE"
 }
 
 get_domains_count() {
@@ -151,7 +156,10 @@ deploy_new_node() {
 
     read -rp "Node Hostname (e.g. node-DE1): " NODE_NAME
     NODE_NAME=${NODE_NAME:-"node-DE1"}
-    read -rp "Node Server IP: " NODE_IP
+    
+    # Primary & Secondary Multi-IP Setup
+    read -rp "Primary Server IP (SSH & Panel Connection): " NODE_IP
+    read -rp "Additional IPs on this server (comma-separated, or press Enter): " EXTRA_IPS
     read -rp "SSH Port [22]: " NODE_SSH_PORT
     NODE_SSH_PORT=${NODE_SSH_PORT:-22}
     read -rp "SSH User [root]: " NODE_SSH_USER
@@ -182,13 +190,33 @@ deploy_new_node() {
     fi
     log INFO "Selected protocol: $PROTO_NAME"
 
-    # Multi-DNS Records Creation Prompt
+    # DNS Presets Selection
     echo -e "\n${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
-    echo -e "${COLOR_YELLOW}Additional Cloudflare DNS Records Creation:${COLOR_RESET}"
-    echo -e "Enter comma-separated subdomain prefixes to point to this node IP ($NODE_IP)"
-    echo -e "Example: sub1, cdn, v2ray (or press ENTER to skip)"
-    echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
-    read -rp "Additional Subdomains: " EXTRA_SUBS
+    echo -e "${COLOR_YELLOW}Cloudflare DNS Auto-Pointing Presets:${COLOR_RESET}"
+    local p_keys=()
+    while IFS= read -r k; do
+        p_keys+=("$k")
+    done < <(jq -r 'keys[]' "$PRESETS_FILE")
+
+    for i in "${!p_keys[@]}"; do
+        local p_name="${p_keys[$i]}"
+        local p_records
+        p_records=$(jq -c --arg k "$p_name" '.[$k]' "$PRESETS_FILE")
+        echo -e "  [$((i + 1))] Preset: ${COLOR_GREEN}$p_name${COLOR_RESET} -> $p_records"
+    done
+    echo "  [0] Custom / Skip Presets"
+    read -rp "Select DNS Preset [1-${#p_keys[@]} or 0]: " P_SEL
+
+    local preset_subs=()
+    if [[ "$P_SEL" =~ ^[1-9][0-9]*$ ]] && [ "$P_SEL" -le "${#p_keys[@]}" ]; then
+        local chosen_key="${p_keys[$((P_SEL - 1))]}"
+        while IFS= read -r sub_val; do
+            preset_subs+=("$sub_val")
+        done < <(jq -r --arg k "$chosen_key" '.[$k][]' "$PRESETS_FILE")
+        log INFO "Loaded DNS Preset '$chosen_key': ${preset_subs[*]}"
+    fi
+
+    read -rp "Additional Custom Subdomains (comma-separated, or Enter to skip): " MANUAL_SUBS
 
     # Multi-Domain SSLs Prompt
     echo -e "\n${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
@@ -274,59 +302,74 @@ REMOTE_INIT
         done
     fi
 
-    # Create Main DNS A-Record
-    log INFO "Configuring Cloudflare DNS A-record: $full_hostname -> $NODE_IP..."
+    # Create Primary Node DNS Record
+    log INFO "Configuring Primary Cloudflare DNS A-record: $full_hostname -> $NODE_IP..."
     local check_dns_res record_id
     check_dns_res=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$selected_zone/dns_records?name=$full_hostname&type=A" \
          -H "Authorization: Bearer $selected_token" \
          -H "Content-Type: application/json")
 
     record_id=$(echo "$check_dns_res" | jq -r '.result[0].id // empty')
-
     if [ -n "$record_id" ]; then
         curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$selected_zone/dns_records/$record_id" \
-             -H "Authorization: Bearer $selected_token" \
-             -H "Content-Type: application/json" \
+             -H "Authorization: Bearer $selected_token" -H "Content-Type: application/json" \
              --data "{\"type\":\"A\",\"name\":\"$full_hostname\",\"content\":\"$NODE_IP\",\"ttl\":1,\"proxied\":false}" >/dev/null
     else
         curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$selected_zone/dns_records" \
-             -H "Authorization: Bearer $selected_token" \
-             -H "Content-Type: application/json" \
+             -H "Authorization: Bearer $selected_token" -H "Content-Type: application/json" \
              --data "{\"type\":\"A\",\"name\":\"$full_hostname\",\"content\":\"$NODE_IP\",\"ttl\":1,\"proxied\":false}" >/dev/null
     fi
     log OK "Primary DNS configured: $full_hostname"
 
-    # Create Extra Subdomain DNS Records
-    local created_dns_list=("$full_hostname")
-    if [ -n "$EXTRA_SUBS" ]; then
-        IFS=',' read -ra SUB_ARR <<< "$EXTRA_SUBS"
-        for sub_item in "${SUB_ARR[@]}"; do
-            sub_item=$(echo "$sub_item" | tr -d ' ')
-            if [ -n "$sub_item" ]; then
-                local extra_full_sub="$sub_item.$selected_domain"
-                log INFO "Creating extra Cloudflare DNS A-record: $extra_full_sub -> $NODE_IP..."
-                local ex_chk ex_id
-                ex_chk=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$selected_zone/dns_records?name=$extra_full_sub&type=A" \
-                     -H "Authorization: Bearer $selected_token" \
-                     -H "Content-Type: application/json")
-                ex_id=$(echo "$ex_chk" | jq -r '.result[0].id // empty')
-
-                if [ -n "$ex_id" ]; then
-                    curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$selected_zone/dns_records/$ex_id" \
-                         -H "Authorization: Bearer $selected_token" \
-                         -H "Content-Type: application/json" \
-                         --data "{\"type\":\"A\",\"name\":\"$extra_full_sub\",\"content\":\"$NODE_IP\",\"ttl\":1,\"proxied\":false}" >/dev/null
-                else
-                    curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$selected_zone/dns_records" \
-                         -H "Authorization: Bearer $selected_token" \
-                         -H "Content-Type: application/json" \
-                         --data "{\"type\":\"A\",\"name\":\"$extra_full_sub\",\"content\":\"$NODE_IP\",\"ttl\":1,\"proxied\":false}" >/dev/null
-                fi
-                created_dns_list+=("$extra_full_sub")
-                log OK "Extra DNS created: $extra_full_sub"
-            fi
+    # Merge Presets and Manual Subdomains
+    local all_extra_subs=("${preset_subs[@]}")
+    if [ -n "$MANUAL_SUBS" ]; then
+        IFS=',' read -ra M_ARR <<< "$MANUAL_SUBS"
+        for m_val in "${M_ARR[@]}"; do
+            m_val=$(echo "$m_val" | tr -d ' ')
+            [ -n "$m_val" ] && all_extra_subs+=("$m_val")
         done
     fi
+
+    # Create All Extra Subdomains (supporting secondary IPs round-robin or assigned)
+    local secondary_ips_list=()
+    if [ -n "$EXTRA_IPS" ]; then
+        IFS=',' read -ra E_IPS <<< "$EXTRA_IPS"
+        for e_ip in "${E_IPS[@]}"; do
+            e_ip=$(echo "$e_ip" | tr -d ' ')
+            [ -n "$e_ip" ] && secondary_ips_list+=("$e_ip")
+        done
+    fi
+
+    local created_dns_list=("$full_hostname")
+    local ip_pool=("$NODE_IP" "${secondary_ips_list[@]}")
+    local ip_pool_idx=0
+
+    for sub_item in "${all_extra_subs[@]}"; do
+        if [ -n "$sub_item" ]; then
+            local target_sub_ip="${ip_pool[$ip_pool_idx]}"
+            ip_pool_idx=$(( (ip_pool_idx + 1) % ${#ip_pool[@]} ))
+
+            local extra_full_sub="$sub_item.$selected_domain"
+            log INFO "Creating DNS A-record: $extra_full_sub -> $target_sub_ip..."
+            local ex_chk ex_id
+            ex_chk=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$selected_zone/dns_records?name=$extra_full_sub&type=A" \
+                 -H "Authorization: Bearer $selected_token" -H "Content-Type: application/json")
+            ex_id=$(echo "$ex_chk" | jq -r '.result[0].id // empty')
+
+            if [ -n "$ex_id" ]; then
+                curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$selected_zone/dns_records/$ex_id" \
+                     -H "Authorization: Bearer $selected_token" -H "Content-Type: application/json" \
+                     --data "{\"type\":\"A\",\"name\":\"$extra_full_sub\",\"content\":\"$target_sub_ip\",\"ttl\":1,\"proxied\":false}" >/dev/null
+            else
+                curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$selected_zone/dns_records" \
+                     -H "Authorization: Bearer $selected_token" -H "Content-Type: application/json" \
+                     --data "{\"type\":\"A\",\"name\":\"$extra_full_sub\",\"content\":\"$target_sub_ip\",\"ttl\":1,\"proxied\":false}" >/dev/null
+            fi
+            created_dns_list+=("$extra_full_sub ($target_sub_ip)")
+            log OK "Created: $extra_full_sub -> $target_sub_ip"
+        fi
+    done
 
     local node_token="Not detected"
     if [[ "$INSTALL_PG" =~ ^[Yy]$ ]]; then
@@ -356,19 +399,21 @@ REMOTE_INSTALL
     local leaf_cert
     leaf_cert=$(openssl x509 -in "$cert_src" 2>/dev/null || cat "$cert_src")
 
-    local dns_json ssl_json
+    local dns_json ssl_json sec_ips_json
     dns_json=$(printf '%s\n' "${created_dns_list[@]}" | jq -R . | jq -s .)
     ssl_json=$(printf '%s\n' "${installed_ssl_domains[@]}" | jq -R . | jq -s .)
+    sec_ips_json=$(printf '%s\n' "${secondary_ips_list[@]}" | jq -R . | jq -s .)
 
     local tmp_node
     tmp_node=$(mktemp)
     jq --arg nm "$NODE_NAME" --arg ip "$NODE_IP" --arg pt "$NODE_SSH_PORT" --arg usr "$NODE_SSH_USER" \
        --arg pwd "$NODE_SSH_PASS" --arg dom "$full_hostname" --arg bdom "$selected_domain" \
        --arg sport "$SERVICE_PORT" --arg aport "$API_PORT" --arg tok "$node_token" --arg proto "$PROTO_NAME" \
-       --argjson dns "$dns_json" --argjson ssls "$ssl_json" \
+       --argjson dns "$dns_json" --argjson ssls "$ssl_json" --argjson sec_ips "$sec_ips_json" \
        'map(select(.hostname != $nm)) + [{
           "hostname": $nm,
           "ip": $ip,
+          "secondary_ips": $sec_ips,
           "ssh_port": $pt,
           "ssh_user": $usr,
           "ssh_pass": $pwd,
@@ -397,7 +442,7 @@ REMOTE_INSTALL
     echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
     echo -e "${COLOR_BOLD}Active DNS Records on Cloudflare:${COLOR_RESET}"
     for rec in "${created_dns_list[@]}"; do
-        echo -e "  ${COLOR_GREEN}• $rec${COLOR_RESET} -> $NODE_IP"
+        echo -e "  ${COLOR_GREEN}• $rec${COLOR_RESET}"
     done
     echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
     echo -e "${COLOR_BOLD}Available Multi-Domain SSLs on Node:${COLOR_RESET}"
@@ -412,6 +457,98 @@ REMOTE_INSTALL
     echo -e "${COLOR_BOLD}Certificate (Copy exactly into Panel Certificate box):${COLOR_RESET}"
     echo -e "${COLOR_YELLOW}$leaf_cert${COLOR_RESET}"
     echo -e "${COLOR_GREEN}${COLOR_BOLD}============================================================${COLOR_RESET}\n"
+}
+
+manage_dns_presets() {
+    while true; do
+        echo -e "\n${COLOR_CYAN}${COLOR_BOLD}--- DNS Subdomain Presets Manager ---${COLOR_RESET}"
+        jq -r 'to_entries[] | "  [" + .key + "]: " + (.value | join(", "))' "$PRESETS_FILE"
+        echo ""
+        echo "  1) Add / Update Preset"
+        echo "  2) Delete Preset"
+        echo "  3) Return to Main Menu"
+        read -rp "Select Option [1-3]: " PR_OPT
+
+        case "$PR_OPT" in
+            1)
+                read -rp "Enter Preset Name (e.g. standard / gaming / cdn): " PNAME
+                PNAME=$(echo "$PNAME" | tr ' ' '_')
+                read -rp "Enter subdomains (comma-separated, e.g. sub1, cdn, direct, vpn): " PSUBS
+                if [ -n "$PNAME" ] && [ -n "$PSUBS" ]; then
+                    local subs_json
+                    subs_json=$(echo "$PSUBS" | tr ',' '\n' | sed 's/^[ \t]*//;s/[ \t]*$//' | grep -v '^$' | jq -R . | jq -s .)
+                    local tmp_pr
+                    tmp_pr=$(mktemp)
+                    jq --arg k "$PNAME" --argjson v "$subs_json" '.[$k] = $v' "$PRESETS_FILE" > "$tmp_pr" && mv "$tmp_pr" "$PRESETS_FILE"
+                    log OK "Preset '$PNAME' saved successfully."
+                fi
+                ;;
+            2)
+                read -rp "Enter Preset Name to delete: " PNAME_DEL
+                local tmp_del
+                tmp_del=$(mktemp)
+                jq --arg k "$PNAME_DEL" 'del(.[$k])' "$PRESETS_FILE" > "$tmp_del" && mv "$tmp_del" "$PRESETS_FILE"
+                log OK "Preset '$PNAME_DEL' deleted."
+                ;;
+            3)
+                break
+                ;;
+        esac
+    done
+}
+
+manage_clean_ips() {
+    while true; do
+        echo -e "\n${COLOR_CYAN}${COLOR_BOLD}--- Cloudflare Clean IPs Manager ---${COLOR_RESET}"
+        list_domain_profiles || true
+        local d_count
+        d_count=$(get_domains_count)
+        if [ "$d_count" -eq 0 ]; then
+            echo -e "${COLOR_YELLOW}Add a domain profile first.${COLOR_RESET}"
+            break
+        fi
+
+        echo "  1) Mass Register Clean IPs into Cloudflare DNS"
+        echo "  2) View Saved Clean IPs"
+        echo "  3) Return to Main Menu"
+        read -rp "Select Option [1-3]: " CL_OPT
+
+        case "$CL_OPT" in
+            1)
+                read -rp "Select Target Domain Profile [1-$d_count]: " C_DOM_IDX
+                local c_dom c_tok c_zid
+                c_dom=$(jq -r ".[$((C_DOM_IDX - 1))].domain" "$DOMAINS_FILE")
+                c_tok=$(jq -r ".[$((C_DOM_IDX - 1))].token" "$DOMAINS_FILE")
+                c_zid=$(jq -r ".[$((C_DOM_IDX - 1))].zone_id" "$DOMAINS_FILE")
+
+                read -rp "Subdomain prefix for Clean IPs (e.g. 'clean' -> clean1.$c_dom, clean2.$c_dom): " PREFIX
+                PREFIX=${PREFIX:-"clean"}
+                echo -e "Enter Clean IPs (comma-separated or paste multiple IPs):"
+                read -rp "IPs: " RAW_IPS
+
+                IFS=',' read -ra IP_LIST <<< "$RAW_IPS"
+                local idx=1
+                for cip in "${IP_LIST[@]}"; do
+                    cip=$(echo "$cip" | tr -d ' \r\n')
+                    if [[ "$cip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                        local rec_name="${PREFIX}${idx}.${c_dom}"
+                        log INFO "Registering $rec_name -> $cip on Cloudflare..."
+                        curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records" \
+                             -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" \
+                             --data "{\"type\":\"A\",\"name\":\"$rec_name\",\"content\":\"$cip\",\"ttl\":1,\"proxied\":false}" >/dev/null
+                        log OK "Created Clean IP DNS: $rec_name -> $cip"
+                        idx=$((idx + 1))
+                    fi
+                done
+                ;;
+            2)
+                echo -e "${COLOR_YELLOW}Saved Clean IP records are managed directly within your Cloudflare Zone.${COLOR_RESET}"
+                ;;
+            3)
+                break
+                ;;
+        esac
+    done
 }
 
 manage_saved_nodes() {
@@ -491,7 +628,7 @@ manage_saved_nodes() {
             echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
             echo -e "${COLOR_BOLD}Registered Cloudflare DNS Records:${COLOR_RESET}"
             jq -r ".[$((N_IDX - 1))].dns_records[]? // empty" "$NODES_FILE" | while read -r drec; do
-                echo -e "  ${COLOR_GREEN}• $drec${COLOR_RESET} -> $target_ip"
+                echo -e "  ${COLOR_GREEN}• $drec${COLOR_RESET}"
             done
             echo -e "${COLOR_CYAN}------------------------------------------------------------${COLOR_RESET}"
             echo -e "${COLOR_BOLD}SSL Domains Available on this Node:${COLOR_RESET}"
@@ -647,13 +784,15 @@ REMOTE_UNINSTALL
                 if [ -n "$cf_tok" ] && [ -n "$cf_zid" ]; then
                     log INFO "Removing DNS records from Cloudflare..."
                     jq -r ".[$((N_IDX - 1))].dns_records[]? // empty" "$NODES_FILE" | while read -r r_to_del; do
+                        local clean_name
+                        clean_name=$(echo "$r_to_del" | awk '{print $1}')
                         local rec_id
-                        rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records?name=$r_to_del&type=A" \
+                        rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records?name=$clean_name&type=A" \
                              -H "Authorization: Bearer $cf_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty')
                         if [ -n "$rec_id" ]; then
                             curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records/$rec_id" \
                                  -H "Authorization: Bearer $cf_tok" -H "Content-Type: application/json" >/dev/null
-                            log OK "Deleted Cloudflare record: $r_to_del"
+                            log OK "Deleted Cloudflare record: $clean_name"
                         fi
                     done
                 fi
@@ -717,7 +856,6 @@ renew_sync_all_ssl() {
                     sshpass -p "$npass" ssh -p "$nport" -o StrictHostKeyChecking=no "$nuser@$nip" "export PATH=/usr/local/bin:\$PATH; pg-node restart -n 2>/dev/null || true"
                 fi
 
-                # Check if node has this domain as secondary injected SSL
                 local is_sec
                 is_sec=$(jq -r --arg d "$dom" ".[$n].ssl_domains[]? | select(. == \$d)" "$NODES_FILE")
                 if [ -n "$is_sec" ] && [ "$dom" != "$nbdom" ]; then
@@ -739,16 +877,18 @@ while true; do
     echo -e "\n${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
     echo -e "${COLOR_CYAN}${COLOR_BOLD}|                PASARGUARD MULTI-NODE AUTO-DEPLOYER                 |${COLOR_RESET}"
     echo -e "${COLOR_CYAN}${COLOR_BOLD}+--------------------------------------------------------------------+${COLOR_RESET}"
-    echo -e "  [1] Deploy New Node (Auto Multi-SSL, Cloudflare Multi-DNS & Zero Error)"
+    echo -e "  [1] Deploy New Node (Multi-IP, DNS Presets & Zero Error)"
     echo -e "  [2] Issue Wildcard SSL Certificate (Let's Encrypt + Cloudflare)"
     echo -e "  [3] Sync SSL to Local Master Server"
-    echo -e "  [4] Manage Saved Nodes (Inspect, Multi-SSL, DNS Records, Protocol)"
+    echo -e "  [4] Manage Saved Nodes (Inspect, Multi-SSL, Multi-DNS, Protocol)"
     echo -e "  [5] Domain Profiles Manager"
-    echo -e "  [6] Renew & Synchronize All SSLs"
-    echo -e "  [7] View Execution Logs"
-    echo -e "  [8] Exit"
+    echo -e "  [6] DNS Subdomain Presets Manager (Templates for new nodes)"
+    echo -e "  [7] Cloudflare Clean IPs Manager (Mass DNS record generation)"
+    echo -e "  [8] Renew & Synchronize All SSLs"
+    echo -e "  [9] View Execution Logs"
+    echo -e "  [10] Exit"
     echo ""
-    read -rp "Select an option [1-8]: " OPTION
+    read -rp "Select an option [1-10]: " OPTION
 
     case "$OPTION" in
         1) deploy_new_node ;;
@@ -781,9 +921,11 @@ while true; do
                log OK "Profile deleted."
            fi
            ;;
-        6) renew_sync_all_ssl ;;
-        7) [ -f "$LOG_FILE" ] && tail -n 50 "$LOG_FILE" || echo "No logs found." ;;
-        8) echo "Goodbye!"; exit 0 ;;
+        6) manage_dns_presets ;;
+        7) manage_clean_ips ;;
+        8) renew_sync_all_ssl ;;
+        9) [ -f "$LOG_FILE" ] && tail -n 50 "$LOG_FILE" || echo "No logs found." ;;
+        10) echo "Goodbye!"; exit 0 ;;
         *) echo -e "${COLOR_RED}Invalid option.${COLOR_RESET}" ;;
     esac
 done
