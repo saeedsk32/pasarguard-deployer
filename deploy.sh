@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# PasarGuard Multi-Node Auto-Deployer (v6.4 - Smart DNS & Modular Edition)
+# PasarGuard Multi-Node Auto-Deployer (v6.5 - Master Infrastructure Edition)
 # Developed by Saeed SK (@saeedsk32)
 # ==============================================================================
 
@@ -33,7 +33,7 @@ ui_banner() {
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██████╔╝██║  ███╗${RST}${BOLD}${C_PURPLE}██║  ██║█████╗  ██████╔╝██║     ██║   ██║ ╚████╔╝ ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██╔═══╝ ██║   ██║${RST}${BOLD}${C_PURPLE}██║  ██║██╔══╝  ██╔═══╝ ██║     ██║   ██║  ╚██╔╝  ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██║     ╚██████╔╝${RST}${BOLD}${C_PURPLE}██████╔╝███████╗██║     ███████╗╚██████╔╝   ██║   ${RST}   ${C_CYAN}│${RST}"
-    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v6.4 (Production)${RST}           ${C_CYAN}│${RST}"
+    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v6.5 (Production)${RST}           ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
 }
 
@@ -61,7 +61,9 @@ log() {
 init_db() {
     [ ! -f "$DOMAINS_FILE" ] && echo '[]' > "$DOMAINS_FILE"
     [ ! -f "$NODES_FILE" ] && echo '[]' > "$NODES_FILE"
-    [ ! -f "$PRESETS_FILE" ] && echo '{"main": ["pool1-1"]}' > "$PRESETS_FILE"
+    if [ ! -f "$PRESETS_FILE" ] || [ "$(cat "$PRESETS_FILE")" == "{}" ]; then
+        echo '{"pool_main": ["pool1-1"]}' > "$PRESETS_FILE"
+    fi
     mkdir -p "$BACKUP_DIR"
     touch "$LOG_FILE"
 }
@@ -200,13 +202,14 @@ manage_node_dns_center() {
                         NEW_R_TAG=${NEW_R_TAG:-"Custom"}
                         local full_comment="PG-Node: $t_host | $NEW_R_TAG"
                         local rec_id
-                        rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?name=$fqdn&content=$curr_ip" \
+                        local rtype="A"; [[ "$curr_ip" == *:* ]] && rtype="AAAA"
+                        rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?name=$fqdn&type=$rtype&content=$curr_ip" \
                              -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty' 2>/dev/null)
                         if [ -n "$rec_id" ]; then
-                            local rtype="A"; [[ "$NEW_R_IP" == *:* ]] && rtype="AAAA"
+                            local new_rtype="A"; [[ "$NEW_R_IP" == *:* ]] && new_rtype="AAAA"
                             curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records/$rec_id" \
                                  -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" \
-                                 --data "{\"type\":\"$rtype\",\"name\":\"$fqdn\",\"content\":\"$NEW_R_IP\",\"ttl\":1,\"proxied\":false,\"comment\":\"$full_comment\"}" >/dev/null
+                                 --data "{\"type\":\"$new_rtype\",\"name\":\"$fqdn\",\"content\":\"$NEW_R_IP\",\"ttl\":1,\"proxied\":false,\"comment\":\"$full_comment\"}" >/dev/null
                             local updated_entry="$fqdn ($NEW_R_IP)"
                             local tmp_u; tmp_u=$(mktemp)
                             jq --arg n "$n_idx" --arg o "$chosen_entry" --arg u "$updated_entry" \
@@ -225,8 +228,9 @@ manage_node_dns_center() {
                         local del_fqdn del_ip
                         del_fqdn=$(echo "$del_entry" | awk '{print $1}')
                         del_ip=$(echo "$del_entry" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+')
+                        local rtype="A"; [[ "$del_ip" == *:* ]] && rtype="AAAA"
                         local rec_id
-                        rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?name=$del_fqdn&content=$del_ip" \
+                        rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?name=$del_fqdn&type=$rtype&content=$del_ip" \
                              -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty' 2>/dev/null)
                         [ -n "$rec_id" ] && curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records/$rec_id" -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" >/dev/null
                         local tmp_del; tmp_del=$(mktemp)
@@ -278,15 +282,37 @@ deploy_new_node() {
     NODE_SSH_USER=${NODE_SSH_USER:-root}
     read -rp "$(echo -e "  ${C_PURPLE}▶ SSH Password: ${RST}")" NODE_SSH_PASS < /dev/tty
 
-    # ۱. آدرس اتصال نود به پنل مستر (فقط به آی‌پی اصلی متصل می‌شود)
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Master Panel Subdomain for this node [ex: de1]: ${RST}")" SUB_PREFIX < /dev/tty
+    # ۱. آدرس اتصال نود به پنل مستر (تنها این ساب‌دامین به IPv4 اصلی وصل می‌شود)
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Master Panel Subdomain prefix [ex: de1]: ${RST}")" SUB_PREFIX < /dev/tty
     SUB_PREFIX=${SUB_PREFIX:-$NODE_HOST}
     local fqdn="$SUB_PREFIX.$base_domain"
 
-    # ۲. ساب‌دامین‌های فروش و Round-Robin
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Attach DNS Presets Templates (like pool1-1)? [Y/n]: ${RST}")" USE_PRESET < /dev/tty
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Extra Custom Subdomains (comma-separated, ex: vpn1, cdn - Optional): ${RST}")" EXTRA_CUSTOM_SUBS < /dev/tty
+    # ۲. انتخاب قالب DNS Presets
+    echo -e "\n  ${BOLD}${C_CYAN}DNS Presets Templates Available:${RST}"
+    local preset_keys=()
+    while IFS= read -r pkey; do [ -n "$pkey" ] && preset_keys+=("$pkey"); done < <(jq -r 'keys[]' "$PRESETS_FILE" 2>/dev/null)
+    
+    local SELECTED_PRESET_SUBS=()
+    if [ ${#preset_keys[@]} -gt 0 ]; then
+        for i in "${!preset_keys[@]}"; do
+            local p_name="${preset_keys[$i]}"
+            local p_items; p_items=$(jq -c --arg k "$p_name" '.[$k]' "$PRESETS_FILE" 2>/dev/null)
+            echo -e "    ${C_PURPLE}[$((i + 1))]${RST} ${BOLD}$p_name${RST} -> $p_items"
+        done
+        read -rp "$(echo -e "  ${C_PURPLE}▶ Choose Preset Template [1-${#preset_keys[@]}, or 0 to skip]: ${RST}")" P_CHOICE < /dev/tty
+        if [[ "$P_CHOICE" =~ ^[0-9]+$ ]] && [ "$P_CHOICE" -ge 1 ] && [ "$P_CHOICE" -le "${#preset_keys[@]}" ]; then
+            local sel_key="${preset_keys[$((P_CHOICE - 1))]}"
+            while IFS= read -r sub_item; do
+                [ -n "$sub_item" ] && SELECTED_PRESET_SUBS+=("$sub_item")
+            done < <(jq -r --arg k "$sel_key" '.[$k][]' "$PRESETS_FILE" 2>/dev/null)
+            echo -e "  ${C_GREEN}✔ Preset '$sel_key' loaded: ${SELECTED_PRESET_SUBS[*]}${RST}"
+        fi
+    fi
 
+    # ۳. ساب‌دامین‌های کاستوم اضافه
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Extra Custom Subdomains for clients (comma-separated, ex: de1-1, cdn - Optional): ${RST}")" EXTRA_CUSTOM_SUBS < /dev/tty
+
+    # ۴. پورت‌ها
     read -rp "$(echo -e "  ${C_PURPLE}▶ Node Port (Service Port) [62050]: ${RST}")" NODE_PORT < /dev/tty
     NODE_PORT=${NODE_PORT:-62050}
     read -rp "$(echo -e "  ${C_PURPLE}▶ Advanced API Port [62051]: ${RST}")" API_PORT < /dev/tty
@@ -311,13 +337,13 @@ deploy_new_node() {
         "modprobe tcp_bbr 2>/dev/null || true; echo 'net.core.default_qdisc=fq' > /etc/sysctl.d/99-bbr.conf; echo 'net.ipv4.tcp_congestion_control=bbr' >> /etc/sysctl.d/99-bbr.conf; sysctl --system >/dev/null 2>&1; ufw allow $NODE_PORT/tcp; ufw allow $API_PORT/tcp; ufw allow 22/tcp; ufw --force enable >/dev/null 2>&1 || true"
 
     log INFO "Deploying Wildcard SSL keys to remote node..."
-    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" "mkdir -p /var/lib/pg-node/certs/$base_domain"
+    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" "mkdir -p /var/lib/pg-node/certs/$base_domain /opt/pg-node"
     sshpass -p "$NODE_SSH_PASS" scp -P "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "/etc/letsencrypt/live/$base_domain/fullchain.pem" "$NODE_SSH_USER@$NODE_IP:/var/lib/pg-node/certs/$base_domain/fullchain.pem" >/dev/null
     sshpass -p "$NODE_SSH_PASS" scp -P "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "/etc/letsencrypt/live/$base_domain/privkey.pem" "$NODE_SSH_USER@$NODE_IP:/var/lib/pg-node/certs/$base_domain/privkey.pem" >/dev/null
     sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" "ln -sf /var/lib/pg-node/certs/$base_domain/fullchain.pem /var/lib/pg-node/certs/ssl_cert.pem && ln -sf /var/lib/pg-node/certs/$base_domain/privkey.pem /var/lib/pg-node/certs/ssl_key.pem"
     log OK "Primary Wildcard SSL transferred."
 
-    # استخراج همه IPها
+    # استخراج کلیه آی‌پی‌های سرور
     local all_v4_ips=("$NODE_IP")
     if [ -n "$EXTRA_IPS" ]; then
         IFS=',' read -ra ADDRS <<< "$EXTRA_IPS"
@@ -329,42 +355,35 @@ deploy_new_node() {
 
     local dns_recs_array=()
 
-    # ۱. فقط ساب‌دامین اختصاصی نود به آی‌پی اصلی متصل می‌شود (بدون Round-Robin تا مستر همیشه مستقیم وصل شود)
+    # ۱. فقط ساب‌دامین اتصال نود به پنل مستر (بدون تکرار و Round-Robin)
     upsert_cloudflare_dns "$zone_id" "$cf_token" "$fqdn" "$NODE_IP" "PG-Node: $NODE_HOST | Master-Link"
     dns_recs_array+=("$fqdn ($NODE_IP)")
 
-    # ۲. ساب‌دامین‌های اختصاصی برای هر IP اضافی
-    local ip_counter=1
-    for extra_ip in "${all_v4_ips[@]:1}"; do
-        local extra_fqdn="${NODE_HOST}-${ip_counter}.${base_domain}"
-        upsert_cloudflare_dns "$zone_id" "$cf_token" "$extra_fqdn" "$extra_ip" "PG-Node: $NODE_HOST | Dedicated-IP$ip_counter"
-        dns_recs_array+=("$extra_fqdn ($extra_ip)")
-        ((ip_counter++))
-    done
-
-    # ۳. ثبت IPv6 (در صورت تایید)
+    # ۲. ثبت IPv6 اختیاری
+    local HAS_V6=0
     if [ -n "$NODE_IPV6" ]; then
-        read -rp "$(echo -e "  ${C_PURPLE}▶ Create Cloudflare AAAA DNS record for IPv6 on $fqdn? [y/N]: ${RST}")" CONFIRM_V6 < /dev/tty
+        read -rp "$(echo -e "  ${C_PURPLE}▶ Create Cloudflare AAAA records for IPv6 on client pool/subdomains? [y/N]: ${RST}")" CONFIRM_V6 < /dev/tty
         if [[ "$CONFIRM_V6" =~ ^[yY]$ ]]; then
-            upsert_cloudflare_dns "$zone_id" "$cf_token" "$fqdn" "$NODE_IPV6" "PG-Node: $NODE_HOST | IPv6"
+            HAS_V6=1
+            upsert_cloudflare_dns "$zone_id" "$cf_token" "$fqdn" "$NODE_IPV6" "PG-Node: $NODE_HOST | Master-IPv6"
             dns_recs_array+=("$fqdn ($NODE_IPV6)")
         fi
     fi
 
-    # ۴. اعمال ساب‌دامین‌های پرکاربرد تمپلیت (Pool) به صورت Round-Robin واقعی روی تمام آی‌پی‌ها
-    if [[ ! "$USE_PRESET" =~ ^[nN]$ ]] && [ -f "$PRESETS_FILE" ]; then
-        local p_subs
-        p_subs=$(jq -r '.main[]? // empty' "$PRESETS_FILE" 2>/dev/null)
-        for ps in $p_subs; do
-            local pool_fqdn="${ps}.${base_domain}"
-            for v4 in "${all_v4_ips[@]}"; do
-                upsert_cloudflare_dns "$zone_id" "$cf_token" "$pool_fqdn" "$v4" "PG-Node: $NODE_HOST | RoundRobin-Pool"
-                dns_recs_array+=("$pool_fqdn ($v4)")
-            done
+    # ۳. رکوردهای تمپلیت (مثل pool1-1) -> اتصال به تک‌تک IPهای سرور (توزیع Round-Robin کامل)
+    for ps in "${SELECTED_PRESET_SUBS[@]}"; do
+        local pool_fqdn="${ps}.${base_domain}"
+        for v4 in "${all_v4_ips[@]}"; do
+            upsert_cloudflare_dns "$zone_id" "$cf_token" "$pool_fqdn" "$v4" "PG-Node: $NODE_HOST | Pool-RoundRobin"
+            dns_recs_array+=("$pool_fqdn ($v4)")
         done
-    fi
+        if [ "$HAS_V6" -eq 1 ]; then
+            upsert_cloudflare_dns "$zone_id" "$cf_token" "$pool_fqdn" "$NODE_IPV6" "PG-Node: $NODE_HOST | Pool-RoundRobin-v6"
+            dns_recs_array+=("$pool_fqdn ($NODE_IPV6)")
+        fi
+    done
 
-    # ۵. اعمال ساب‌دامین‌های سفارشی کاربر به صورت Round-Robin روی تمام IPها
+    # ۴. رکوردهای کاستوم کاربر -> اتصال به تک‌تک IPهای سرور (Round-Robin)
     if [ -n "$EXTRA_CUSTOM_SUBS" ]; then
         IFS=',' read -ra CSUBS <<< "$EXTRA_CUSTOM_SUBS"
         for cs in "${CSUBS[@]}"; do
@@ -375,19 +394,31 @@ deploy_new_node() {
                     upsert_cloudflare_dns "$zone_id" "$cf_token" "$c_fqdn" "$v4" "PG-Node: $NODE_HOST | Custom-RR"
                     dns_recs_array+=("$c_fqdn ($v4)")
                 done
+                if [ "$HAS_V6" -eq 1 ]; then
+                    upsert_cloudflare_dns "$zone_id" "$cf_token" "$c_fqdn" "$NODE_IPV6" "PG-Node: $NODE_HOST | Custom-RR-v6"
+                    dns_recs_array+=("$c_fqdn ($NODE_IPV6)")
+                fi
             fi
         done
     fi
 
-    log INFO "Provisioning PasarGuard Node core using official script..."
-    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" \
-        "sudo bash -c \"\$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)\" @ install $proto_flag --service-port $NODE_PORT --api-port $API_PORT --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem -y >/dev/null 2>&1"
+    log INFO "Provisioning PasarGuard Node core on remote server..."
+    echo -e "  ${C_GRAY}Executing official installer...${RST}"
 
-    sleep 3
-    # استخراج توکن از مسیرهای احتمالی فایل .env یا کانفیگ سرویس
+    # تولید توکن یکتا و پایدار پیش از نصب
+    local generated_api_key
+    generated_api_key=$(python3 -c "import uuid; print(uuid.uuid4())")
+
+    # اجرای زنده اسکریپت نصب رسمی نود بدون مخفی‌سازی خطاها
+    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" \
+        "sudo bash -c \"\$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)\" @ install $proto_flag --service-port $NODE_PORT --api-port $API_PORT --api-key $generated_api_key --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem -y"
+
+    sleep 2
+    # اطمینان از استخراج قطعی توکن
     local token_extracted
     token_extracted=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" \
-        "grep -oE '[0-9a-fA-F-]{36}' /opt/pg-node/.env 2>/dev/null || grep -oE '[0-9a-fA-F-]{36}' /etc/systemd/system/pg-node.service 2>/dev/null | head -n 1" 2>/dev/null || echo "")
+        "grep -oE '[0-9a-fA-F-]{36}' /opt/pg-node/.env 2>/dev/null || grep -oE '[0-9a-fA-F-]{36}' /etc/systemd/system/pg-node.service 2>/dev/null || echo '$generated_api_key'" | head -n 1)
+    token_extracted=${token_extracted:-$generated_api_key}
 
     local node_json_entry
     node_json_entry=$(jq -n \
@@ -397,7 +428,7 @@ deploy_new_node() {
         --arg sport "$NODE_PORT" \
         --arg aport "$API_PORT" \
         --arg proto "$proto_str" \
-        --arg tok "${token_extracted:-Not detected}" \
+        --arg tok "$token_extracted" \
         --arg bdom "$base_domain" \
         --arg upass "$NODE_SSH_PASS" \
         --arg uport "$NODE_SSH_PORT" \
@@ -411,7 +442,7 @@ deploy_new_node() {
     local tmp_n; tmp_n=$(mktemp)
     jq --argjson newnode "$node_json_entry" '. += [$newnode]' "$NODES_FILE" > "$tmp_n" && mv "$tmp_n" "$NODES_FILE"
 
-    log OK "Node successfully deployed and registered."
+    log OK "Node successfully deployed and registered!"
     read -rp "  Press [ENTER] to return to dashboard..." < /dev/tty
 }
 
@@ -453,7 +484,7 @@ manage_saved_nodes() {
         while true; do
             ui_sub_banner
             
-            # بررسی زنده وضعیت BBR
+            # بررسی وضعیت BBR
             local bbr_status="${C_GRAY}Unknown${RST}"
             local active_cc
             active_cc=$(sshpass -p "$target_pass" ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 "$target_user@$target_ip" "sysctl -n net.ipv4.tcp_congestion_control" 2>/dev/null)
@@ -465,24 +496,12 @@ manage_saved_nodes() {
                 bbr_status="${C_RED}✖ Unreachable${RST}"
             fi
 
-            # وضعیت ارتباط زنده سرویس API نود
+            # وضعیت پورت و لایو بودن سرویس
             local panel_status="${C_GREEN}● Online (API Listening)${RST}"
             local port_check
             port_check=$(sshpass -p "$target_pass" ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 "$target_user@$target_ip" "ss -tlpn | grep -q $target_aport && echo OK || echo FAIL" 2>/dev/null)
             if [ "$port_check" != "OK" ]; then
                 panel_status="${C_YELLOW}○ Standby / Checking${RST}"
-            fi
-
-            # تلاش مجدد برای خواندن توکن در صورت خالی بودن
-            if [ -z "$target_token" ] || [ "$target_token" == "Not detected" ]; then
-                local live_tok
-                live_tok=$(sshpass -p "$target_pass" ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 "$target_user@$target_ip" \
-                    "grep -oE '[0-9a-fA-F-]{36}' /opt/pg-node/.env 2>/dev/null || grep -oE '[0-9a-fA-F-]{36}' /etc/systemd/system/pg-node.service 2>/dev/null | head -n 1" 2>/dev/null)
-                if [ -n "$live_tok" ]; then
-                    target_token="$live_tok"
-                    local tmp_tk; tmp_tk=$(mktemp)
-                    jq --arg n "$idx_pos" --arg k "$live_tok" '.[($n|tonumber)].api_token = $k' "$NODES_FILE" > "$tmp_tk" && mv "$tmp_tk" "$NODES_FILE"
-                fi
             fi
 
             # خواندن گواهی
@@ -494,7 +513,7 @@ manage_saved_nodes() {
                 _leaf_cert="(Certificate not found on remote node)"
             fi
 
-            # کارت کامل اتصال پنل
+            # نمایش مستقیم کارت نود
             echo -e "  ${C_GREEN}╭────────────────────────────────────────────────────────────────────────╮${RST}"
             echo -e "  ${C_GREEN}│         PASARGUARD PANEL CONNECTION DETAILS                            │${RST}"
             echo -e "  ${C_GREEN}├────────────────────────────────────────────────────────────────────────┤${RST}"
@@ -580,7 +599,7 @@ manage_saved_nodes() {
                     read -rp "  Press [ENTER] to continue..." < /dev/tty
                     ;;
                 5)
-                    eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node restart -n 2>/dev/null || true'"
+                    eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node restart -y 2>/dev/null || true'"
                     log OK "Node service restarted."
                     read -rp "  Press [ENTER] to continue..." < /dev/tty
                     ;;
@@ -609,12 +628,12 @@ manage_saved_nodes() {
                     eval "$ssh_cmd -t 'export PATH=/usr/local/bin:\$PATH; pg-node xray'"
                     ;;
                 10)
-                    eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node update -n 2>/dev/null || true'"
+                    eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node update -y 2>/dev/null || true'"
                     log OK "PasarGuard node software update triggered."
                     read -rp "  Press [ENTER] to continue..." < /dev/tty
                     ;;
                 11)
-                    eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node geo -n 2>/dev/null || true'"
+                    eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node geo -y 2>/dev/null || true'"
                     log OK "GeoFiles updated on remote node."
                     read -rp "  Press [ENTER] to continue..." < /dev/tty
                     ;;
@@ -623,7 +642,7 @@ manage_saved_nodes() {
                     if [ -z "$NEW_MANUAL_KEY" ]; then
                         NEW_MANUAL_KEY=$(python3 -c "import uuid; print(uuid.uuid4())")
                     fi
-                    eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; sed -i \"s/^API_KEY=.*/API_KEY=$NEW_MANUAL_KEY/\" /opt/pg-node/.env 2>/dev/null || true; pg-node restart -n 2>/dev/null || true'"
+                    eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; sed -i \"s/^API_KEY=.*/API_KEY=$NEW_MANUAL_KEY/\" /opt/pg-node/.env 2>/dev/null || true; pg-node restart -y 2>/dev/null || true'"
                     local tmp_k; tmp_k=$(mktemp)
                     jq --arg n "$idx_pos" --arg k "$NEW_MANUAL_KEY" '.[($n|tonumber)].api_token = $k' "$NODES_FILE" > "$tmp_k" && mv "$tmp_k" "$NODES_FILE"
                     target_token="$NEW_MANUAL_KEY"
@@ -636,7 +655,7 @@ manage_saved_nodes() {
                     read -rp "  ▶ New API Port [$target_aport]: " NEW_APORT < /dev/tty
                     NEW_APORT=${NEW_APORT:-$target_aport}
                     
-                    eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; sed -i \"s/^SERVICE_PORT=.*/SERVICE_PORT=$NEW_SPORT/\" /opt/pg-node/.env 2>/dev/null || true; sed -i \"s/^API_PORT=.*/API_PORT=$NEW_APORT/\" /opt/pg-node/.env 2>/dev/null || true; ufw allow $NEW_SPORT/tcp >/dev/null 2>&1; ufw allow $NEW_APORT/tcp >/dev/null 2>&1; pg-node restart -n 2>/dev/null || true'"
+                    eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; sed -i \"s/^SERVICE_PORT=.*/SERVICE_PORT=$NEW_SPORT/\" /opt/pg-node/.env 2>/dev/null || true; sed -i \"s/^API_PORT=.*/API_PORT=$NEW_APORT/\" /opt/pg-node/.env 2>/dev/null || true; ufw allow $NEW_SPORT/tcp >/dev/null 2>&1; ufw allow $NEW_APORT/tcp >/dev/null 2>&1; pg-node restart -y 2>/dev/null || true'"
                     local tmp_po; tmp_po=$(mktemp)
                     jq --arg n "$idx_pos" --arg sp "$NEW_SPORT" --arg ap "$NEW_APORT" '.[($n|tonumber)].service_port = ($sp|tonumber) | .[($n|tonumber)].api_port = ($ap|tonumber)' "$NODES_FILE" > "$tmp_po" && mv "$tmp_po" "$NODES_FILE"
                     target_sport="$NEW_SPORT"
@@ -660,9 +679,12 @@ manage_saved_nodes() {
                         c_zid=$(jq -r --arg bd "$target_bdom" '.[] | select(.domain == $bd) | .zone_id' "$DOMAINS_FILE")
                         if [ -n "$c_tok" ] && [ -n "$c_zid" ]; then
                             jq -r ".[$idx_pos].dns_records[]? // empty" "$NODES_FILE" | while read -r r_to_del; do
-                                local clean_name; clean_name=$(echo "$r_to_del" | awk '{print $1}')
+                                local clean_name clean_dip rtype="A"
+                                clean_name=$(echo "$r_to_del" | awk '{print $1}')
+                                clean_dip=$(echo "$r_to_del" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+')
+                                [[ "$clean_dip" == *:* ]] && rtype="AAAA"
                                 local rec_id
-                                rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records?name=$clean_name" \
+                                rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records?name=$clean_name&type=$rtype&content=$clean_dip" \
                                      -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty' 2>/dev/null)
                                 [ -n "$rec_id" ] && curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records/$rec_id" -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" >/dev/null
                             done
@@ -686,7 +708,7 @@ node_management_menu() {
         ui_sub_banner
         echo -e "  ${BOLD}${C_CYAN}MODULE 1: NODE MANAGEMENT${RST}"
         echo -e "  ${C_GRAY}Deploy and orchestrate PasarGuard remote nodes${RST}\n"
-        echo -e "  ${C_CYAN}[1]${RST} 🚀 Deploy New Node (Multi-IP, Multi-SSL & Round-Robin)"
+        echo -e "  ${C_CYAN}[1]${RST} 🚀 Deploy New Node (Multi-IP, DNS Presets & Round-Robin)"
         echo -e "  ${C_CYAN}[2]${RST} 📋 Manage Saved Nodes (IP Migration, Live BBR & DNS)"
         echo -e "  ${C_GRAY}[0]  Back to Main Dashboard${RST}"
         read -rp "$(echo -e "\n  ${C_PURPLE}▶ Select Option [0-2]: ${RST}")" NM_OPT < /dev/tty
@@ -788,10 +810,10 @@ cloudflare_dns_center() {
             2)
                 echo -e "\n  ${BOLD}${C_CYAN}Current DNS Presets Templates:${RST}"
                 cat "$PRESETS_FILE"
-                read -rp "$(echo -e "\n  ${C_PURPLE}Do you want to add a new preset? [y/N]: ${RST}")" ADD_P < /dev/tty
+                read -rp "$(echo -e "\n  ${C_PURPLE}Do you want to add/edit a preset? [y/N]: ${RST}")" ADD_P < /dev/tty
                 if [[ "$ADD_P" =~ ^[yY]$ ]]; then
-                    read -rp "Preset Name (ex: gaming): " P_NAME < /dev/tty
-                    read -rp "Subdomains (comma-separated, ex: sub1, direct): " P_SUBS < /dev/tty
+                    read -rp "Preset Name (ex: pool_main): " P_NAME < /dev/tty
+                    read -rp "Subdomains (comma-separated, ex: pool1-1, cdn): " P_SUBS < /dev/tty
                     if [ -n "$P_NAME" ] && [ -n "$P_SUBS" ]; then
                         IFS=',' read -ra S_LIST <<< "$P_SUBS"
                         local json_array="["
@@ -858,7 +880,6 @@ view_logs() {
     read -rp "  Press [ENTER] to return..." < /dev/tty
 }
 
-# بارگذاری دیتابیس‌ها و ابزارهای مورد نیاز
 init_db
 sudo apt-get install -qq -y jq sshpass curl tar certbot python3 >/dev/null 2>&1
 
