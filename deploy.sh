@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# PasarGuard Multi-Node Auto-Deployer (v8.3 - Fixed Path & Dossier Edition)
+# PasarGuard Multi-Node Auto-Deployer (v8.4 - Multi-SSL Pre-Seeding Edition)
 # Developed by Saeed SK (@saeedsk32)
 # ==============================================================================
 
@@ -32,7 +32,7 @@ ui_banner() {
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██████╔╝██║  ███╗${RST}${BOLD}${C_PURPLE}██║  ██║█████╗  ██████╔╝██║     ██║   ██║ ╚████╔╝ ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██╔═══╝ ██║   ██║${RST}${BOLD}${C_PURPLE}██║  ██║██╔══╝  ██╔═══╝ ██║     ██║   ██║  ╚██╔╝  ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██║     ╚██████╔╝${RST}${BOLD}${C_PURPLE}██████╔╝███████╗██║     ███████╗╚██████╔╝   ██║   ${RST}   ${C_CYAN}│${RST}"
-    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v8.3 (Production)${RST}           ${C_CYAN}│${RST}"
+    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v8.4 (Production)${RST}           ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
 }
 
@@ -152,6 +152,317 @@ generate_node_self_signed() {
     else
         log OK "Self-Signed cert stored in /var/lib/pg-node/certs/self_cert.pem (Standby)."
     fi
+}
+
+deploy_new_node() {
+    ui_banner
+    echo -e "  ${BOLD}${C_CYAN}🚀 DEPLOY NEW PASARGUARD NODE${RST}\n"
+    
+    local d_count; d_count=$(get_domains_count)
+    if [ "$d_count" -eq 0 ]; then
+        log ERROR "No domain profile found. Please add a domain first."
+        read -rp "Press [ENTER] to return..." < /dev/tty
+        return 1
+    fi
+
+    list_domain_profiles
+    read -rp "$(echo -e "\n  ${C_PURPLE}▶ Select Main Domain Profile [1-$d_count]: ${RST}")" D_IDX < /dev/tty
+    if ! [[ "$D_IDX" =~ ^[0-9]+$ ]] || [ "$D_IDX" -lt 1 ] || [ "$D_IDX" -gt "$d_count" ]; then
+        log ERROR "Invalid domain selection."
+        read -rp "Press [ENTER] to return..." < /dev/tty
+        return 1
+    fi
+
+    local dom_idx=$((D_IDX - 1))
+    local base_domain cf_token zone_id
+    base_domain=$(jq -r ".[$dom_idx].domain" "$DOMAINS_FILE")
+    cf_token=$(jq -r ".[$dom_idx].token" "$DOMAINS_FILE")
+    zone_id=$(jq -r ".[$dom_idx].zone_id" "$DOMAINS_FILE")
+
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Node Name / Hostname (ex: node-DE1): ${RST}")" NODE_HOST < /dev/tty
+    NODE_HOST=${NODE_HOST:-node1}
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Primary Server IPv4 (Main IP): ${RST}")" NODE_IP < /dev/tty
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Additional IPv4s (comma-separated - Optional): ${RST}")" EXTRA_IPS < /dev/tty
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Server IPv6 (Optional): ${RST}")" NODE_IPV6 < /dev/tty
+    read -rp "$(echo -e "  ${C_PURPLE}▶ SSH Port [22]: ${RST}")" NODE_SSH_PORT < /dev/tty
+    NODE_SSH_PORT=${NODE_SSH_PORT:-22}
+    read -rp "$(echo -e "  ${C_PURPLE}▶ SSH User [root]: ${RST}")" NODE_SSH_USER < /dev/tty
+    NODE_SSH_USER=${NODE_SSH_USER:-root}
+    read -srp "$(echo -e "  ${C_PURPLE}▶ SSH Password: ${RST}")" NODE_SSH_PASS < /dev/tty
+    echo ""
+
+    echo -e "  ${C_GRAY}ℹ Note: This subdomain is strictly used for Master Panel <-> Node orchestration.${RST}"
+    echo -e "  ${C_GRAY}  It will point ONLY to your Primary IPv4 to avoid hostname mismatch.${RST}"
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Node Subdomain for Master Panel (e.g. de1 -> de1.${base_domain}): ${RST}")" SUB_PREFIX < /dev/tty
+    SUB_PREFIX=${SUB_PREFIX:-$NODE_HOST}
+    local fqdn="$SUB_PREFIX.$base_domain"
+
+    echo -e "\n  ${BOLD}${C_CYAN}DNS Presets Templates Available:${RST}"
+    local preset_keys=()
+    while IFS= read -r pkey; do [ -n "$pkey" ] && preset_keys+=("$pkey"); done < <(jq -r 'keys[]' "$PRESETS_FILE" 2>/dev/null)
+    
+    local SELECTED_PRESET_SUBS=()
+    if [ ${#preset_keys[@]} -gt 0 ]; then
+        for i in "${!preset_keys[@]}"; do
+            local p_name="${preset_keys[$i]}"
+            local p_items; p_items=$(jq -c --arg k "$p_name" '.[$k]' "$PRESETS_FILE" 2>/dev/null)
+            echo -e "    ${C_PURPLE}[$((i + 1))]${RST} ${BOLD}$p_name${RST} -> $p_items"
+        done
+        read -rp "$(echo -e "  ${C_PURPLE}▶ Choose Preset Template [1-${#preset_keys[@]}, or 0 to skip]: ${RST}")" P_CHOICE < /dev/tty
+        if [[ "$P_CHOICE" =~ ^[0-9]+$ ]] && [ "$P_CHOICE" -ge 1 ] && [ "$P_CHOICE" -le "${#preset_keys[@]}" ]; then
+            local sel_key="${preset_keys[$((P_CHOICE - 1))]}"
+            while IFS= read -r sub_item; do
+                [ -n "$sub_item" ] && SELECTED_PRESET_SUBS+=("$sub_item")
+            done < <(jq -r --arg k "$sel_key" '.[$k][]' "$PRESETS_FILE" 2>/dev/null)
+            echo -e "  ${C_GREEN}✔ Preset '$sel_key' loaded: ${SELECTED_PRESET_SUBS[*]}${RST}"
+        fi
+    fi
+
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Extra Custom Subdomains for clients (comma-separated, ex: de1-1, cdn - Optional): ${RST}")" EXTRA_CUSTOM_SUBS < /dev/tty
+
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Node Port (Service Port) [62050]: ${RST}")" NODE_PORT < /dev/tty
+    NODE_PORT=${NODE_PORT:-62050}
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Advanced API Port [62051]: ${RST}")" API_PORT < /dev/tty
+    API_PORT=${API_PORT:-62051}
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Protocol: [1] gRPC (Default) or [2] REST [1]: ${RST}")" PROTO_CHOICE < /dev/tty
+    local proto_flag="--use-grpc" proto_str="grpc"
+    [ "$PROTO_CHOICE" == "2" ] && { proto_flag="--use-rest"; proto_str="rest"; }
+
+    # =========================================================================
+    # MULTI-SSL PRE-SEEDING SELECTION
+    # =========================================================================
+    echo -e "\n  ${BOLD}${C_CYAN}🔐 MULTI-SSL INBOUND VAULT PRE-SEEDING:${RST}"
+    echo -e "  ${C_GRAY}Select which certificates you want to pre-load onto this node for client inbounds:${RST}"
+    local all_domains=()
+    while IFS= read -r drow; do
+        all_domains+=("$(echo "$drow" | jq -r '.domain')")
+    done < <(jq -c '.[]' "$DOMAINS_FILE" 2>/dev/null)
+
+    for i in "${!all_domains[@]}"; do
+        echo -e "    ${C_PURPLE}[$((i + 1))]${RST} Wildcard SSL: *.${all_domains[$i]}"
+    done
+    echo -e "    ${C_GREEN}[all]${RST} Deploy ALL available domain certificates automatically"
+
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Select Certificates to Pre-Seed [all, or numbers like 1,2]: ${RST}")" SEED_CHOICE < /dev/tty
+    SEED_CHOICE=${SEED_CHOICE:-all}
+
+    local DOMAINS_TO_SEED=()
+    if [[ "$SEED_CHOICE" =~ ^[aA][lL][lL]$ ]]; then
+        DOMAINS_TO_SEED=("${all_domains[@]}")
+    else
+        IFS=',' read -ra S_PARTS <<< "$SEED_CHOICE"
+        for sp in "${S_PARTS[@]}"; do
+            local clean_sp; clean_sp=$(echo "$sp" | tr -d ' ')
+            if [[ "$clean_sp" =~ ^[0-9]+$ ]] && [ "$clean_sp" -ge 1 ] && [ "$clean_sp" -le "${#all_domains[@]}" ]; then
+                DOMAINS_TO_SEED+=("${all_domains[$((clean_sp - 1))]}")
+            fi
+        done
+    fi
+    # اطمینان از اینکه دامنه اصلی حتماً در لیست هست
+    local found_base=0
+    for d in "${DOMAINS_TO_SEED[@]}"; do [ "$d" == "$base_domain" ] && found_base=1; done
+    [ "$found_base" -eq 0 ] && DOMAINS_TO_SEED+=("$base_domain")
+
+    echo -e "  ${C_GREEN}✔ Will pre-seed certificates for: ${DOMAINS_TO_SEED[*]}${RST}\n"
+
+    log INFO "Verifying SSH connection to $NODE_IP:$NODE_SSH_PORT..."
+    local ssh_test
+    ssh_test=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" "echo connected" 2>&1)
+    if [[ $? -ne 0 ]]; then
+        log ERROR "Cannot connect via SSH to $NODE_IP:$NODE_SSH_PORT"
+        echo -e "  ${C_RED}Error details:${RST} $ssh_test"
+        read -rp "  Press [ENTER] to return..." < /dev/tty
+        return 1
+    fi
+    log OK "SSH connection established."
+
+    log INFO "Tuning kernel TCP BBR and baseline firewall..."
+    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" \
+        "modprobe tcp_bbr 2>/dev/null || true; echo 'net.core.default_qdisc=fq' > /etc/sysctl.d/99-bbr.conf; echo 'net.ipv4.tcp_congestion_control=bbr' >> /etc/sysctl.d/99-bbr.conf; sysctl --system >/dev/null 2>&1; ufw allow $NODE_PORT/tcp; ufw allow $API_PORT/tcp; ufw allow 22/tcp; ufw --force enable >/dev/null 2>&1 || true"
+
+    local all_v4_ips=("$NODE_IP")
+    if [ -n "$EXTRA_IPS" ]; then
+        IFS=',' read -ra ADDRS <<< "$EXTRA_IPS"
+        for aip in "${ADDRS[@]}"; do
+            local clean_aip; clean_aip=$(echo "$aip" | tr -d ' ')
+            [ -n "$clean_aip" ] && all_v4_ips+=("$clean_aip")
+        done
+    fi
+
+    local dns_recs_array=()
+
+    upsert_cloudflare_dns "$zone_id" "$cf_token" "$fqdn" "$NODE_IP" "PG-Node: $NODE_HOST | Master-Link"
+    dns_recs_array+=("$fqdn ($NODE_IP)")
+
+    local HAS_V6=0
+    if [ -n "$NODE_IPV6" ]; then
+        read -rp "$(echo -e "  ${C_PURPLE}▶ Create Cloudflare AAAA records for IPv6 on client pool/subdomains? [y/N]: ${RST}")" CONFIRM_V6 < /dev/tty
+        if [[ "$CONFIRM_V6" =~ ^[yY]$ ]]; then
+            HAS_V6=1
+            upsert_cloudflare_dns "$zone_id" "$cf_token" "$fqdn" "$NODE_IPV6" "PG-Node: $NODE_HOST | Master-IPv6"
+            dns_recs_array+=("$fqdn ($NODE_IPV6)")
+        fi
+    fi
+
+    for ps in "${SELECTED_PRESET_SUBS[@]}"; do
+        local pool_fqdn="${ps}.${base_domain}"
+        for v4 in "${all_v4_ips[@]}"; do
+            upsert_cloudflare_dns "$zone_id" "$cf_token" "$pool_fqdn" "$v4" "PG-Node: $NODE_HOST | Pool-RoundRobin"
+            dns_recs_array+=("$pool_fqdn ($v4)")
+        done
+        if [ "$HAS_V6" -eq 1 ]; then
+            upsert_cloudflare_dns "$zone_id" "$cf_token" "$pool_fqdn" "$NODE_IPV6" "PG-Node: $NODE_HOST | Pool-RoundRobin-v6"
+            dns_recs_array+=("$pool_fqdn ($NODE_IPV6)")
+        fi
+    done
+
+    if [ -n "$EXTRA_CUSTOM_SUBS" ]; then
+        IFS=',' read -ra CSUBS <<< "$EXTRA_CUSTOM_SUBS"
+        for cs in "${CSUBS[@]}"; do
+            local clean_cs; clean_cs=$(echo "$cs" | tr -d ' ')
+            if [ -n "$clean_cs" ]; then
+                local c_fqdn="${clean_cs}.${base_domain}"
+                for v4 in "${all_v4_ips[@]}"; do
+                    upsert_cloudflare_dns "$zone_id" "$cf_token" "$c_fqdn" "$v4" "PG-Node: $NODE_HOST | Custom-RR"
+                    dns_recs_array+=("$c_fqdn ($v4)")
+                done
+                if [ "$HAS_V6" -eq 1 ]; then
+                    upsert_cloudflare_dns "$zone_id" "$cf_token" "$c_fqdn" "$NODE_IPV6" "PG-Node: $NODE_HOST | Custom-RR-v6"
+                    dns_recs_array+=("$c_fqdn ($NODE_IPV6)")
+                fi
+            fi
+        done
+    fi
+
+    log INFO "Purging old node states and provisioning core on remote server..."
+    local generated_api_key
+    generated_api_key=$(python3 -c "import uuid; print(uuid.uuid4())")
+
+    sshpass -p "$NODE_SSH_PASS" ssh -t -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" \
+        "echo -e 'y\ny' | pg-node uninstall 2>/dev/null || true; docker rm -f node 2>/dev/null || true; systemctl stop pg-node pg-node-service 2>/dev/null || true; rm -rf /opt/pg-node /usr/local/bin/pg-node /usr/bin/pg-node /etc/systemd/system/pg-node*.service; systemctl daemon-reload 2>/dev/null || true; curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh -o /tmp/pg-node.sh && chmod +x /tmp/pg-node.sh && /tmp/pg-node.sh install $proto_flag --service-port $NODE_PORT --api-port $API_PORT --api-key $generated_api_key -y; mkdir -p /var/lib/pg-node/certs; cp -f /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pg-node/certs/self_cert.pem 2>/dev/null || true; cp -f /var/lib/pg-node/certs/ssl_key.pem /var/lib/pg-node/certs/self_key.pem 2>/dev/null || true"
+
+    sleep 2
+    local token_extracted
+    token_extracted=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" \
+        "grep -oE '[0-9a-fA-F-]{36}' /opt/pg-node/.env 2>/dev/null || grep -oE '[0-9a-fA-F-]{36}' /etc/systemd/system/pg-node.service 2>/dev/null || echo '$generated_api_key'" | head -n 1)
+    token_extracted=${token_extracted:-$generated_api_key}
+
+    # انتقال تمامی گواهی‌های انتخاب‌شده به پوشه اختصاصی روی نود
+    log INFO "Pre-seeding selected Wildcard SSL certificates to Multi-SSL Vault..."
+    for s_dom in "${DOMAINS_TO_SEED[@]}"; do
+        local l_cert="/etc/letsencrypt/live/$s_dom/fullchain.pem"
+        local l_key="/etc/letsencrypt/live/$s_dom/privkey.pem"
+        if [ -f "$l_cert" ] && [ -f "$l_key" ]; then
+            sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" "mkdir -p /var/lib/pg-node/certs/$s_dom"
+            sshpass -p "$NODE_SSH_PASS" scp -P "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$l_cert" "$NODE_SSH_USER@$NODE_IP:/var/lib/pg-node/certs/$s_dom/fullchain.pem" >/dev/null
+            sshpass -p "$NODE_SSH_PASS" scp -P "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$l_key" "$NODE_SSH_USER@$NODE_IP:/var/lib/pg-node/certs/$s_dom/privkey.pem" >/dev/null
+            log OK "Pre-seeded certificate: $s_dom"
+        fi
+    done
+
+    # ست کردن گواهی دامنه اصلی به عنوان گواهی سرویس ارتباطی با پنل مستر
+    local main_c="/var/lib/pg-node/certs/${base_domain}/fullchain.pem"
+    local main_k="/var/lib/pg-node/certs/${base_domain}/privkey.pem"
+    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" \
+        "cp -f $main_c /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || true; cp -f $main_k /var/lib/pg-node/certs/ssl_key.pem 2>/dev/null || true; docker restart node 2>/dev/null || true; systemctl restart pg-node-service 2>/dev/null || true"
+
+    local node_json_entry
+    node_json_entry=$(jq -n \
+        --arg h "$NODE_HOST" \
+        --arg ip "$NODE_IP" \
+        --arg addr "$fqdn" \
+        --arg sport "$NODE_PORT" \
+        --arg aport "$API_PORT" \
+        --arg proto "$proto_str" \
+        --arg tok "$token_extracted" \
+        --arg bdom "$base_domain" \
+        --arg upass "$NODE_SSH_PASS" \
+        --arg uport "$NODE_SSH_PORT" \
+        --arg uusr "$NODE_SSH_USER" \
+        '{hostname: $h, ip: $ip, address: $addr, service_port: ($sport|tonumber), api_port: ($aport|tonumber), protocol: $proto, api_token: $tok, base_domain: $bdom, ssh_pass: $upass, ssh_port: ($uport|tonumber), ssh_user: $uusr, dns_records: [], ssl_domains: []}')
+
+    for r in "${dns_recs_array[@]}"; do
+        node_json_entry=$(echo "$node_json_entry" | jq --arg rec "$r" '.dns_records += [$rec]')
+    done
+    for sd in "${DOMAINS_TO_SEED[@]}"; do
+        node_json_entry=$(echo "$node_json_entry" | jq --arg sdom "$sd" '.ssl_domains += [$sdom]')
+    done
+
+    local tmp_n; tmp_n=$(mktemp)
+    jq --argjson newnode "$node_json_entry" '. += [$newnode]' "$NODES_FILE" > "$tmp_n" && mv "$tmp_n" "$NODES_FILE"
+
+    log OK "Node successfully deployed with complete Multi-SSL Vault!"
+    read -rp "  Press [ENTER] to return to dashboard..." < /dev/tty
+}
+
+add_existing_active_node() {
+    ui_banner
+    echo -e "  ${BOLD}${C_CYAN}🔗 ATTACH & AUTO-DISCOVER AN EXISTING ACTIVE NODE${RST}\n"
+    list_domain_profiles
+    local dc; dc=$(get_domains_count)
+    if [ "$dc" -eq 0 ]; then
+        read -rp "Press [ENTER] to return..." < /dev/tty
+        return 1
+    fi
+
+    read -rp "$(echo -e "\n  ${C_PURPLE}▶ Select Domain Profile [1-$dc]: ${RST}")" D_IDX < /dev/tty
+    local bdom; bdom=$(jq -r ".[$((D_IDX - 1))].domain" "$DOMAINS_FILE")
+    read -rp "  ▶ Node Hostname (e.g. node-DE1): " E_HOST < /dev/tty
+    read -rp "  ▶ Primary Server IPv4: " E_IP < /dev/tty
+    read -rp "  ▶ Remote SSH Port [22]: " E_PORT < /dev/tty
+    E_PORT=${E_PORT:-22}
+    read -rp "  ▶ Remote SSH User [root]: " E_USER < /dev/tty
+    E_USER=${E_USER:-root}
+    read -srp "  ▶ Remote SSH Password: " E_PASS < /dev/tty
+    echo ""
+
+    echo -e "\n  ${C_BLUE}ℹ Connecting to $E_IP:$E_PORT to auto-discover configuration...${RST}"
+    local ssh_c="sshpass -p '$E_PASS' ssh -p $E_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR $E_USER@$E_IP"
+
+    local disc_data
+    disc_data=$(eval "$ssh_c '
+        echo \"===CONF===\"
+        cat /opt/pg-node/.env 2>/dev/null
+        echo \"===SERVICE===\"
+        cat /etc/systemd/system/pg-node-service.service 2>/dev/null
+        echo \"===PORTS===\"
+        ss -tlpn 2>/dev/null
+    '")
+
+    local e_tok e_sport e_aport e_proto
+    e_tok=$(echo "$disc_data" | grep -oE '[0-9a-fA-F-]{36}' | head -n1)
+    e_sport=$(echo "$disc_data" | grep "^SERVICE_PORT=" | cut -d'=' -f2 | tr -d ' \r')
+    e_aport=$(echo "$disc_data" | grep "^API_PORT=" | cut -d'=' -f2 | tr -d ' \r')
+    e_proto=$(echo "$disc_data" | grep -iq "grpc" && echo "grpc" || echo "rest")
+
+    e_sport=${e_sport:-62050}
+    e_aport=${e_aport:-62051}
+
+    echo -e "  ${C_GREEN}✔ Discovered Configuration:${RST}"
+    echo -e "    • API Key Secret : ${C_YELLOW}${e_tok:-Manual Entry Required}${RST}"
+    echo -e "    • Service Port   : ${C_YELLOW}${e_sport}${RST}"
+    echo -e "    • API Port       : ${C_YELLOW}${e_aport}${RST}"
+    echo -e "    • Protocol       : ${C_YELLOW}${e_proto^^}${RST}"
+
+    if [ -z "$e_tok" ]; then
+        read -rp "  ▶ Enter API Key manually: " e_tok < /dev/tty
+    fi
+
+    read -rp "  ▶ Master FQDN Address [e.g. $E_HOST.$bdom]: " E_ADDR < /dev/tty
+    E_ADDR=${E_ADDR:-"$E_HOST.$bdom"}
+
+    local new_entry
+    new_entry=$(jq -n \
+        --arg h "$E_HOST" --arg ip "$E_IP" --arg addr "$E_ADDR" \
+        --arg sport "$e_sport" --arg aport "$e_aport" --arg proto "$e_proto" \
+        --arg tok "$e_tok" --arg bdom "$bdom" --arg upass "$E_PASS" \
+        --arg uport "$E_PORT" --arg uusr "$E_USER" \
+        '{hostname: $h, ip: $ip, address: $addr, service_port: ($sport|tonumber), api_port: ($aport|tonumber), protocol: $proto, api_token: $tok, base_domain: $bdom, ssh_pass: $upass, ssh_port: ($uport|tonumber), ssh_user: $uusr, dns_records: [$addr], ssl_domains: [$bdom]}')
+
+    local tmp_n; tmp_n=$(mktemp)
+    jq --argjson ne "$new_entry" '. += [$ne]' "$NODES_FILE" > "$tmp_n" && mv "$tmp_n" "$NODES_FILE"
+    log OK "Existing node $E_HOST attached and synchronized."
+    read -rp "  Press [ENTER] to return to dashboard..." < /dev/tty
 }
 
 inspect_node_ssl_details() {
@@ -296,378 +607,6 @@ inspect_node_ssl_details() {
             read -rp "  Press [ENTER] to continue..." < /dev/tty
         fi
     fi
-}
-
-manage_node_dns_center() {
-    local n_idx="$1"
-    local t_host t_bdom
-    t_host=$(jq -r ".[$n_idx].hostname" "$NODES_FILE")
-    t_bdom=$(jq -r ".[$n_idx].base_domain" "$NODES_FILE")
-    local c_tok c_zid
-    c_tok=$(jq -r --arg bd "$t_bdom" '.[] | select(.domain == $bd) | .token' "$DOMAINS_FILE")
-    c_zid=$(jq -r --arg bd "$t_bdom" '.[] | select(.domain == $bd) | .zone_id' "$DOMAINS_FILE")
-
-    while true; do
-        ui_sub_banner
-        echo -e "  ${BOLD}${C_CYAN}🌐 CLOUDFLARE DNS MANAGEMENT FOR NODE: $t_host ($t_bdom)${RST}\n"
-        local recs=()
-        while IFS= read -r r; do [ -n "$r" ] && recs+=("$r"); done < <(jq -r ".[$n_idx].dns_records[]? // empty" "$NODES_FILE")
-
-        if [ ${#recs[@]} -eq 0 ]; then
-            echo -e "  ${C_YELLOW}No DNS records currently registered for this node.${RST}\n"
-        else
-            echo -e "  ${C_PURPLE}Active DNS Records in Inventory:${RST}"
-            for i in "${!recs[@]}"; do
-                echo -e "    ${C_CYAN}[$((i + 1))]${RST} ${recs[$i]}"
-            done
-            echo ""
-        fi
-
-        echo -e "    ${C_GREEN}[1]${RST} ➕ Add New Subdomain Record (Single IP or Multi-IP Pool)"
-        echo -e "    ${C_YELLOW}[2]${RST} ✏️  Edit Target IP / Tag of an Existing Record"
-        echo -e "    ${C_RED}[3]${RST} 🗑️  Delete a Record from Cloudflare & Local Inventory"
-        echo -e "    ${C_GRAY}[0]${RST} 🔙 Back to Node Dashboard"
-        read -rp "$(echo -e "\n  ${C_PURPLE}▶ Choose DNS Action [0-3]: ${RST}")" DNS_ACT < /dev/tty
-
-        case "$DNS_ACT" in
-            1)
-                read -rp "  ▶ Subdomain prefix (ex: pool1-1 or cdn): " NEW_SUB < /dev/tty
-                read -rp "  ▶ Target IP(s) (comma-separated for Round-Robin): " NEW_IPS < /dev/tty
-                read -rp "  ▶ Cloudflare Comment Tag [RoundRobin]: " NEW_TAG < /dev/tty
-                NEW_TAG=${NEW_TAG:-RoundRobin}
-                if [ -n "$NEW_SUB" ] && [ -n "$NEW_IPS" ]; then
-                    local target_fqdn="${NEW_SUB}.${t_bdom}"
-                    IFS=',' read -ra IPS_TO_ADD <<< "$NEW_IPS"
-                    for raw_i in "${IPS_TO_ADD[@]}"; do
-                        local cl_ip; cl_ip=$(echo "$raw_i" | tr -d ' ')
-                        if [ -n "$cl_ip" ]; then
-                            upsert_cloudflare_dns "$c_zid" "$c_tok" "$target_fqdn" "$cl_ip" "PG-Node: $t_host | $NEW_TAG"
-                            local entry_str="$target_fqdn ($cl_ip)"
-                            local tmp_f; tmp_f=$(mktemp)
-                            jq --arg n "$idx_pos" --arg e "$entry_str" '.[($n|tonumber)].dns_records += [$e]' "$NODES_FILE" > "$tmp_f" && mv "$tmp_f" "$NODES_FILE"
-                            log OK "Added DNS Record $entry_str"
-                        fi
-                    done
-                fi
-                read -rp "  Press [ENTER] to continue..." < /dev/tty
-                ;;
-            2)
-                if [ ${#recs[@]} -gt 0 ]; then
-                    read -rp "  ▶ Select record number to edit [1-${#recs[@]}]: " R_EDIT < /dev/tty
-                    if [[ "$R_EDIT" =~ ^[0-9]+$ ]] && [ "$R_EDIT" -ge 1 ] && [ "$R_EDIT" -le "${#recs[@]}" ]; then
-                        local chosen_entry="${recs[$((R_EDIT - 1))]}"
-                        local fqdn curr_ip
-                        fqdn=$(echo "$chosen_entry" | awk '{print $1}')
-                        curr_ip=$(echo "$chosen_entry" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+')
-                        read -rp "  ▶ New IP Address [$curr_ip]: " NEW_R_IP < /dev/tty
-                        NEW_R_IP=${NEW_R_IP:-"$curr_ip"}
-                        read -rp "  ▶ New Comment tag: " NEW_R_TAG < /dev/tty
-                        NEW_R_TAG=${NEW_R_TAG:-"Custom"}
-                        local full_comment="PG-Node: $t_host | $NEW_R_TAG"
-                        local rec_id
-                        local rtype="A"; [[ "$curr_ip" == *:* ]] && rtype="AAAA"
-                        rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?name=$fqdn&type=$rtype&content=$curr_ip" \
-                             -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty' 2>/dev/null)
-                        if [ -n "$rec_id" ]; then
-                            local new_rtype="A"; [[ "$NEW_R_IP" == *:* ]] && new_rtype="AAAA"
-                            curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records/$rec_id" \
-                                 -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" \
-                                 --data "{\"type\":\"$new_rtype\",\"name\":\"$fqdn\",\"content\":\"$NEW_R_IP\",\"ttl\":1,\"proxied\":false,\"comment\":\"$full_comment\"}" >/dev/null
-                            local updated_entry="$fqdn ($NEW_R_IP)"
-                            local tmp_u; tmp_u=$(mktemp)
-                            jq --arg n "$idx_pos" --arg o "$chosen_entry" --arg u "$updated_entry" \
-                               '.[($n|tonumber)].dns_records = [.[($n|tonumber)].dns_records[] | if . == $o then $u else . end]' "$NODES_FILE" > "$tmp_u" && mv "$tmp_u" "$NODES_FILE"
-                            log OK "Updated DNS record to $NEW_R_IP"
-                        fi
-                    fi
-                fi
-                read -rp "  Press [ENTER] to continue..." < /dev/tty
-                ;;
-            3)
-                if [ ${#recs[@]} -gt 0 ]; then
-                    read -rp "  ▶ Select record number to delete [1-${#recs[@]}]: " R_DEL < /dev/tty
-                    if [[ "$R_DEL" =~ ^[0-9]+$ ]] && [ "$R_DEL" -ge 1 ] && [ "$R_DEL" -le "${#recs[@]}" ]; then
-                        local del_entry="${recs[$((R_DEL - 1))]}"
-                        local del_fqdn del_ip
-                        del_fqdn=$(echo "$del_entry" | awk '{print $1}')
-                        del_ip=$(echo "$del_entry" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+')
-                        local rtype="A"; [[ "$del_ip" == *:* ]] && rtype="AAAA"
-                        local rec_id
-                        rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records?name=$del_fqdn&type=$rtype&content=$del_ip" \
-                             -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty' 2>/dev/null)
-                        [ -n "$rec_id" ] && curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records/$rec_id" -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" >/dev/null
-                        local tmp_del; tmp_del=$(mktemp)
-                        jq --arg n "$idx_pos" --arg o "$del_entry" '.[($n|tonumber)].dns_records = [.[($n|tonumber)].dns_records[] | select(. != $o)]' "$NODES_FILE" > "$tmp_del" && mv "$tmp_del" "$NODES_FILE"
-                        log OK "Record $del_fqdn ($del_ip) deleted."
-                    fi
-                fi
-                read -rp "  Press [ENTER] to continue..." < /dev/tty
-                ;;
-            0) break ;;
-            *) ;;
-        esac
-    done
-}
-
-deploy_new_node() {
-    ui_banner
-    echo -e "  ${BOLD}${C_CYAN}🚀 DEPLOY NEW PASARGUARD NODE${RST}\n"
-    
-    local d_count; d_count=$(get_domains_count)
-    if [ "$d_count" -eq 0 ]; then
-        log ERROR "No domain profile found. Please add a domain first."
-        read -rp "Press [ENTER] to return..." < /dev/tty
-        return 1
-    fi
-
-    list_domain_profiles
-    read -rp "$(echo -e "\n  ${C_PURPLE}▶ Select Main Domain Profile [1-$d_count]: ${RST}")" D_IDX < /dev/tty
-    if ! [[ "$D_IDX" =~ ^[0-9]+$ ]] || [ "$D_IDX" -lt 1 ] || [ "$D_IDX" -gt "$d_count" ]; then
-        log ERROR "Invalid domain selection."
-        read -rp "Press [ENTER] to return..." < /dev/tty
-        return 1
-    fi
-
-    local dom_idx=$((D_IDX - 1))
-    local base_domain cf_token zone_id
-    base_domain=$(jq -r ".[$dom_idx].domain" "$DOMAINS_FILE")
-    cf_token=$(jq -r ".[$dom_idx].token" "$DOMAINS_FILE")
-    zone_id=$(jq -r ".[$dom_idx].zone_id" "$DOMAINS_FILE")
-
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Node Name / Hostname (ex: node-DE1): ${RST}")" NODE_HOST < /dev/tty
-    NODE_HOST=${NODE_HOST:-node1}
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Primary Server IPv4 (Main IP): ${RST}")" NODE_IP < /dev/tty
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Additional IPv4s (comma-separated - Optional): ${RST}")" EXTRA_IPS < /dev/tty
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Server IPv6 (Optional): ${RST}")" NODE_IPV6 < /dev/tty
-    read -rp "$(echo -e "  ${C_PURPLE}▶ SSH Port [22]: ${RST}")" NODE_SSH_PORT < /dev/tty
-    NODE_SSH_PORT=${NODE_SSH_PORT:-22}
-    read -rp "$(echo -e "  ${C_PURPLE}▶ SSH User [root]: ${RST}")" NODE_SSH_USER < /dev/tty
-    NODE_SSH_USER=${NODE_SSH_USER:-root}
-    read -srp "$(echo -e "  ${C_PURPLE}▶ SSH Password: ${RST}")" NODE_SSH_PASS < /dev/tty
-    echo ""
-
-    echo -e "  ${C_GRAY}ℹ Note: This subdomain is strictly used for Master Panel <-> Node orchestration.${RST}"
-    echo -e "  ${C_GRAY}  It will point ONLY to your Primary IPv4 to avoid hostname mismatch.${RST}"
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Node Subdomain for Master Panel (e.g. de1 -> de1.${base_domain}): ${RST}")" SUB_PREFIX < /dev/tty
-    SUB_PREFIX=${SUB_PREFIX:-$NODE_HOST}
-    local fqdn="$SUB_PREFIX.$base_domain"
-
-    echo -e "\n  ${BOLD}${C_CYAN}DNS Presets Templates Available:${RST}"
-    local preset_keys=()
-    while IFS= read -r pkey; do [ -n "$pkey" ] && preset_keys+=("$pkey"); done < <(jq -r 'keys[]' "$PRESETS_FILE" 2>/dev/null)
-    
-    local SELECTED_PRESET_SUBS=()
-    if [ ${#preset_keys[@]} -gt 0 ]; then
-        for i in "${!preset_keys[@]}"; do
-            local p_name="${preset_keys[$i]}"
-            local p_items; p_items=$(jq -c --arg k "$p_name" '.[$k]' "$PRESETS_FILE" 2>/dev/null)
-            echo -e "    ${C_PURPLE}[$((i + 1))]${RST} ${BOLD}$p_name${RST} -> $p_items"
-        done
-        read -rp "$(echo -e "  ${C_PURPLE}▶ Choose Preset Template [1-${#preset_keys[@]}, or 0 to skip]: ${RST}")" P_CHOICE < /dev/tty
-        if [[ "$P_CHOICE" =~ ^[0-9]+$ ]] && [ "$P_CHOICE" -ge 1 ] && [ "$P_CHOICE" -le "${#preset_keys[@]}" ]; then
-            local sel_key="${preset_keys[$((P_CHOICE - 1))]}"
-            while IFS= read -r sub_item; do
-                [ -n "$sub_item" ] && SELECTED_PRESET_SUBS+=("$sub_item")
-            done < <(jq -r --arg k "$sel_key" '.[$k][]' "$PRESETS_FILE" 2>/dev/null)
-            echo -e "  ${C_GREEN}✔ Preset '$sel_key' loaded: ${SELECTED_PRESET_SUBS[*]}${RST}"
-        fi
-    fi
-
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Extra Custom Subdomains for clients (comma-separated, ex: de1-1, cdn - Optional): ${RST}")" EXTRA_CUSTOM_SUBS < /dev/tty
-
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Node Port (Service Port) [62050]: ${RST}")" NODE_PORT < /dev/tty
-    NODE_PORT=${NODE_PORT:-62050}
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Advanced API Port [62051]: ${RST}")" API_PORT < /dev/tty
-    API_PORT=${API_PORT:-62051}
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Protocol: [1] gRPC (Default) or [2] REST [1]: ${RST}")" PROTO_CHOICE < /dev/tty
-    local proto_flag="--use-grpc" proto_str="grpc"
-    [ "$PROTO_CHOICE" == "2" ] && { proto_flag="--use-rest"; proto_str="rest"; }
-
-    log INFO "Verifying SSH connection to $NODE_IP:$NODE_SSH_PORT..."
-    local ssh_test
-    ssh_test=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" "echo connected" 2>&1)
-    if [[ $? -ne 0 ]]; then
-        log ERROR "Cannot connect via SSH to $NODE_IP:$NODE_SSH_PORT"
-        echo -e "  ${C_RED}Error details:${RST} $ssh_test"
-        read -rp "  Press [ENTER] to return..." < /dev/tty
-        return 1
-    fi
-    log OK "SSH connection established."
-
-    log INFO "Tuning kernel TCP BBR and baseline firewall..."
-    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" \
-        "modprobe tcp_bbr 2>/dev/null || true; echo 'net.core.default_qdisc=fq' > /etc/sysctl.d/99-bbr.conf; echo 'net.ipv4.tcp_congestion_control=bbr' >> /etc/sysctl.d/99-bbr.conf; sysctl --system >/dev/null 2>&1; ufw allow $NODE_PORT/tcp; ufw allow $API_PORT/tcp; ufw allow 22/tcp; ufw --force enable >/dev/null 2>&1 || true"
-
-    log INFO "Deploying Wildcard SSL keys to remote node..."
-    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" "mkdir -p /var/lib/pg-node/certs/$base_domain /opt/pg-node"
-    sshpass -p "$NODE_SSH_PASS" scp -P "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "/etc/letsencrypt/live/$base_domain/fullchain.pem" "$NODE_SSH_USER@$NODE_IP:/var/lib/pg-node/certs/$base_domain/fullchain.pem" >/dev/null
-    sshpass -p "$NODE_SSH_PASS" scp -P "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "/etc/letsencrypt/live/$base_domain/privkey.pem" "$NODE_SSH_USER@$NODE_IP:/var/lib/pg-node/certs/$base_domain/privkey.pem" >/dev/null
-    log OK "Primary Wildcard SSL transferred to /var/lib/pg-node/certs/$base_domain."
-
-    local all_v4_ips=("$NODE_IP")
-    if [ -n "$EXTRA_IPS" ]; then
-        IFS=',' read -ra ADDRS <<< "$EXTRA_IPS"
-        for aip in "${ADDRS[@]}"; do
-            local clean_aip; clean_aip=$(echo "$aip" | tr -d ' ')
-            [ -n "$clean_aip" ] && all_v4_ips+=("$clean_aip")
-        done
-    fi
-
-    local dns_recs_array=()
-
-    upsert_cloudflare_dns "$zone_id" "$cf_token" "$fqdn" "$NODE_IP" "PG-Node: $NODE_HOST | Master-Link"
-    dns_recs_array+=("$fqdn ($NODE_IP)")
-
-    local HAS_V6=0
-    if [ -n "$NODE_IPV6" ]; then
-        read -rp "$(echo -e "  ${C_PURPLE}▶ Create Cloudflare AAAA records for IPv6 on client pool/subdomains? [y/N]: ${RST}")" CONFIRM_V6 < /dev/tty
-        if [[ "$CONFIRM_V6" =~ ^[yY]$ ]]; then
-            HAS_V6=1
-            upsert_cloudflare_dns "$zone_id" "$cf_token" "$fqdn" "$NODE_IPV6" "PG-Node: $NODE_HOST | Master-IPv6"
-            dns_recs_array+=("$fqdn ($NODE_IPV6)")
-        fi
-    fi
-
-    for ps in "${SELECTED_PRESET_SUBS[@]}"; do
-        local pool_fqdn="${ps}.${base_domain}"
-        for v4 in "${all_v4_ips[@]}"; do
-            upsert_cloudflare_dns "$zone_id" "$cf_token" "$pool_fqdn" "$v4" "PG-Node: $NODE_HOST | Pool-RoundRobin"
-            dns_recs_array+=("$pool_fqdn ($v4)")
-        done
-        if [ "$HAS_V6" -eq 1 ]; then
-            upsert_cloudflare_dns "$zone_id" "$cf_token" "$pool_fqdn" "$NODE_IPV6" "PG-Node: $NODE_HOST | Pool-RoundRobin-v6"
-            dns_recs_array+=("$pool_fqdn ($NODE_IPV6)")
-        fi
-    done
-
-    if [ -n "$EXTRA_CUSTOM_SUBS" ]; then
-        IFS=',' read -ra CSUBS <<< "$EXTRA_CUSTOM_SUBS"
-        for cs in "${CSUBS[@]}"; do
-            local clean_cs; clean_cs=$(echo "$cs" | tr -d ' ')
-            if [ -n "$clean_cs" ]; then
-                local c_fqdn="${clean_cs}.${base_domain}"
-                for v4 in "${all_v4_ips[@]}"; do
-                    upsert_cloudflare_dns "$zone_id" "$cf_token" "$c_fqdn" "$v4" "PG-Node: $NODE_HOST | Custom-RR"
-                    dns_recs_array+=("$c_fqdn ($v4)")
-                done
-                if [ "$HAS_V6" -eq 1 ]; then
-                    upsert_cloudflare_dns "$zone_id" "$cf_token" "$c_fqdn" "$NODE_IPV6" "PG-Node: $NODE_HOST | Custom-RR-v6"
-                    dns_recs_array+=("$c_fqdn ($NODE_IPV6)")
-                fi
-            fi
-        done
-    fi
-
-    log INFO "Purging old node states and provisioning core on remote server..."
-    local generated_api_key
-    generated_api_key=$(python3 -c "import uuid; print(uuid.uuid4())")
-
-    local remote_c="/var/lib/pg-node/certs/${base_domain}/fullchain.pem"
-    local remote_k="/var/lib/pg-node/certs/${base_domain}/privkey.pem"
-
-    sshpass -p "$NODE_SSH_PASS" ssh -t -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" \
-        "echo -e 'y\ny' | pg-node uninstall 2>/dev/null || true; docker rm -f node 2>/dev/null || true; systemctl stop pg-node pg-node-service 2>/dev/null || true; rm -rf /opt/pg-node /usr/local/bin/pg-node /usr/bin/pg-node /etc/systemd/system/pg-node*.service; systemctl daemon-reload 2>/dev/null || true; curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh -o /tmp/pg-node.sh && chmod +x /tmp/pg-node.sh && /tmp/pg-node.sh install $proto_flag --service-port $NODE_PORT --api-port $API_PORT --api-key $generated_api_key -y; cp -f /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pg-node/certs/self_cert.pem 2>/dev/null || true; cp -f /var/lib/pg-node/certs/ssl_key.pem /var/lib/pg-node/certs/self_key.pem 2>/dev/null || true; cp -f $remote_c /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || true; cp -f $remote_k /var/lib/pg-node/certs/ssl_key.pem 2>/dev/null || true; docker restart node 2>/dev/null || true; systemctl restart pg-node-service 2>/dev/null || true"
-
-    sleep 2
-    local token_extracted
-    token_extracted=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" \
-        "grep -oE '[0-9a-fA-F-]{36}' /opt/pg-node/.env 2>/dev/null || grep -oE '[0-9a-fA-F-]{36}' /etc/systemd/system/pg-node.service 2>/dev/null || echo '$generated_api_key'" | head -n 1)
-    token_extracted=${token_extracted:-$generated_api_key}
-
-    local node_json_entry
-    node_json_entry=$(jq -n \
-        --arg h "$NODE_HOST" \
-        --arg ip "$NODE_IP" \
-        --arg addr "$fqdn" \
-        --arg sport "$NODE_PORT" \
-        --arg aport "$API_PORT" \
-        --arg proto "$proto_str" \
-        --arg tok "$token_extracted" \
-        --arg bdom "$base_domain" \
-        --arg upass "$NODE_SSH_PASS" \
-        --arg uport "$NODE_SSH_PORT" \
-        --arg uusr "$NODE_SSH_USER" \
-        '{hostname: $h, ip: $ip, address: $addr, service_port: ($sport|tonumber), api_port: ($aport|tonumber), protocol: $proto, api_token: $tok, base_domain: $bdom, ssh_pass: $upass, ssh_port: ($uport|tonumber), ssh_user: $uusr, dns_records: [], ssl_domains: [$bdom]}')
-
-    for r in "${dns_recs_array[@]}"; do
-        node_json_entry=$(echo "$node_json_entry" | jq --arg rec "$r" '.dns_records += [$rec]')
-    done
-
-    local tmp_n; tmp_n=$(mktemp)
-    jq --argjson newnode "$node_json_entry" '. += [$newnode]' "$NODES_FILE" > "$tmp_n" && mv "$tmp_n" "$NODES_FILE"
-
-    log OK "Node successfully deployed and registered!"
-    read -rp "  Press [ENTER] to return to dashboard..." < /dev/tty
-}
-
-add_existing_active_node() {
-    ui_banner
-    echo -e "  ${BOLD}${C_CYAN}🔗 ATTACH & AUTO-DISCOVER AN EXISTING ACTIVE NODE${RST}\n"
-    list_domain_profiles
-    local dc; dc=$(get_domains_count)
-    if [ "$dc" -eq 0 ]; then
-        read -rp "Press [ENTER] to return..." < /dev/tty
-        return 1
-    fi
-
-    read -rp "$(echo -e "\n  ${C_PURPLE}▶ Select Domain Profile [1-$dc]: ${RST}")" D_IDX < /dev/tty
-    local bdom; bdom=$(jq -r ".[$((D_IDX - 1))].domain" "$DOMAINS_FILE")
-    read -rp "  ▶ Node Hostname (e.g. node-DE1): " E_HOST < /dev/tty
-    read -rp "  ▶ Primary Server IPv4: " E_IP < /dev/tty
-    read -rp "  ▶ Remote SSH Port [22]: " E_PORT < /dev/tty
-    E_PORT=${E_PORT:-22}
-    read -rp "  ▶ Remote SSH User [root]: " E_USER < /dev/tty
-    E_USER=${E_USER:-root}
-    read -srp "  ▶ Remote SSH Password: " E_PASS < /dev/tty
-    echo ""
-
-    echo -e "\n  ${C_BLUE}ℹ Connecting to $E_IP:$E_PORT to auto-discover configuration...${RST}"
-    local ssh_c="sshpass -p '$E_PASS' ssh -p $E_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR $E_USER@$E_IP"
-
-    local disc_data
-    disc_data=$(eval "$ssh_c '
-        echo \"===CONF===\"
-        cat /opt/pg-node/.env 2>/dev/null
-        echo \"===SERVICE===\"
-        cat /etc/systemd/system/pg-node-service.service 2>/dev/null
-        echo \"===PORTS===\"
-        ss -tlpn 2>/dev/null
-    '")
-
-    local e_tok e_sport e_aport e_proto
-    e_tok=$(echo "$disc_data" | grep -oE '[0-9a-fA-F-]{36}' | head -n1)
-    e_sport=$(echo "$disc_data" | grep "^SERVICE_PORT=" | cut -d'=' -f2 | tr -d ' \r')
-    e_aport=$(echo "$disc_data" | grep "^API_PORT=" | cut -d'=' -f2 | tr -d ' \r')
-    e_proto=$(echo "$disc_data" | grep -iq "grpc" && echo "grpc" || echo "rest")
-
-    e_sport=${e_sport:-62050}
-    e_aport=${e_aport:-62051}
-
-    echo -e "  ${C_GREEN}✔ Discovered Configuration:${RST}"
-    echo -e "    • API Key Secret : ${C_YELLOW}${e_tok:-Manual Entry Required}${RST}"
-    echo -e "    • Service Port   : ${C_YELLOW}${e_sport}${RST}"
-    echo -e "    • API Port       : ${C_YELLOW}${e_aport}${RST}"
-    echo -e "    • Protocol       : ${C_YELLOW}${e_proto^^}${RST}"
-
-    if [ -z "$e_tok" ]; then
-        read -rp "  ▶ Enter API Key manually: " e_tok < /dev/tty
-    fi
-
-    read -rp "  ▶ Master FQDN Address [e.g. $E_HOST.$bdom]: " E_ADDR < /dev/tty
-    E_ADDR=${E_ADDR:-"$E_HOST.$bdom"}
-
-    local new_entry
-    new_entry=$(jq -n \
-        --arg h "$E_HOST" --arg ip "$E_IP" --arg addr "$E_ADDR" \
-        --arg sport "$e_sport" --arg aport "$e_aport" --arg proto "$e_proto" \
-        --arg tok "$e_tok" --arg bdom "$bdom" --arg upass "$E_PASS" \
-        --arg uport "$E_PORT" --arg uusr "$E_USER" \
-        '{hostname: $h, ip: $ip, address: $addr, service_port: ($sport|tonumber), api_port: ($aport|tonumber), protocol: $proto, api_token: $tok, base_domain: $bdom, ssh_pass: $upass, ssh_port: ($uport|tonumber), ssh_user: $uusr, dns_records: [$addr], ssl_domains: [$bdom]}')
-
-    local tmp_n; tmp_n=$(mktemp)
-    jq --argjson ne "$new_entry" '. += [$ne]' "$NODES_FILE" > "$tmp_n" && mv "$tmp_n" "$NODES_FILE"
-    log OK "Existing node $E_HOST attached and synchronized."
-    read -rp "  Press [ENTER] to return to dashboard..." < /dev/tty
 }
 
 manage_saved_nodes() {
