@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# PasarGuard Multi-Node Auto-Deployer (v7.0 - Unified Single-View Edition)
+# PasarGuard Multi-Node Auto-Deployer (v7.1 - Multi-SSL Injection Edition)
 # Developed by Saeed SK (@saeedsk32)
 # ==============================================================================
 
@@ -33,7 +33,7 @@ ui_banner() {
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██████╔╝██║  ███╗${RST}${BOLD}${C_PURPLE}██║  ██║█████╗  ██████╔╝██║     ██║   ██║ ╚████╔╝ ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██╔═══╝ ██║   ██║${RST}${BOLD}${C_PURPLE}██║  ██║██╔══╝  ██╔═══╝ ██║     ██║   ██║  ╚██╔╝  ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██║     ╚██████╔╝${RST}${BOLD}${C_PURPLE}██████╔╝███████╗██║     ███████╗╚██████╔╝   ██║   ${RST}   ${C_CYAN}│${RST}"
-    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v7.0 (Production)${RST}           ${C_CYAN}│${RST}"
+    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v7.1 (Production)${RST}           ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
 }
 
@@ -165,7 +165,7 @@ inspect_node_ssl_details() {
     cert_subj=$(echo "$raw_cert" | openssl x509 -noout -subject 2>/dev/null | sed 's/subject=//')
     cert_issuer=$(echo "$raw_cert" | openssl x509 -noout -issuer 2>/dev/null | sed 's/issuer=//')
     cert_san=$(echo "$raw_cert" | openssl x509 -noout -ext subjectAltName 2>/dev/null | grep -v "X509v3" | tr -d ' ' || echo "N/A")
-    
+
     if [[ "$cert_issuer" == *"Let's Encrypt"* ]]; then
         cert_type="${C_GREEN}● Official Wildcard SSL (Let's Encrypt)${RST}"
     else
@@ -313,7 +313,7 @@ manage_node_dns_center() {
                         local rec_id
                         rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?name=$del_fqdn&type=$rtype&content=$del_ip" \
                              -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty' 2>/dev/null)
-                        [ -n "$rec_id" ] && curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records/$rec_id" -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" >/dev/null
+                        [ -n "$rec_id" ] && curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records/$rec_id" -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" >/dev/null
                         local tmp_del; tmp_del=$(mktemp)
                         jq --arg n "$n_idx" --arg o "$del_entry" '.[($n|tonumber)].dns_records = [.[($n|tonumber)].dns_records[] | select(. != $o)]' "$NODES_FILE" > "$tmp_del" && mv "$tmp_del" "$NODES_FILE"
                         log OK "Record $del_fqdn ($del_ip) deleted."
@@ -600,7 +600,7 @@ manage_saved_nodes() {
             printf "  ${C_GREEN}│${RST}  Connection Type      : %-46s ${C_GREEN}│${RST}\n" "${target_proto^^}"
             printf "  ${C_GREEN}│${RST}  Panel Service Link   : %-55b ${C_GREEN}│${RST}\n" "$panel_status"
             printf "  ${C_GREEN}│${RST}  TCP BBR Engine       : %-55b ${C_GREEN}│${RST}\n" "$bbr_status"
-            printf "  ${C_GREEN}│${RST}  API Key              : %-46s ${C_GREEN}│${RST}\n" "${target_token:-Not detected}"
+            printf "  ${C_GREEN}│${RST}  API Key Secret       : %-46s ${C_GREEN}│${RST}\n" "${target_token:-Not detected}"
             echo -e "  ${C_GREEN}├────────────────────────────────────────────────────────────────────────┤${RST}"
             echo -e "  ${C_GREEN}│  Cloudflare DNS Records:                                               │${RST}"
             while IFS= read -r drec; do
@@ -616,8 +616,9 @@ manage_saved_nodes() {
             echo -e "  ${BOLD}${C_BLUE}⚡ ORCHESTRATOR & INFRASTRUCTURE ACTIONS:${RST}"
             echo -e "    ${C_PURPLE}[1]${RST}  🔁 1-Click Server IP Migration (Auto CF DNS)"
             echo -e "    ${C_PURPLE}[2]${RST}  🌐 Cloudflare DNS Center (Add / Edit / Delete Records)"
-            echo -e "    ${C_PURPLE}[3]${RST}  🔐 Inspect / Manage Node SSLs & Raw Keys"
+            echo -e "    ${C_PURPLE}[3]${RST}  🔐 Inspect / View Active SSL & Raw Keys"
             echo -e "    ${C_PURPLE}[4]${RST}  🚀 Toggle / Tune TCP BBR Congestion Control"
+            echo -e "    ${C_PURPLE}[16]${RST} 📤 Inject / Overwrite Node SSL with Any Domain"
 
             echo -e "\n  ${BOLD}${C_GREEN}🔧 PG-NODE CORE ACTIONS (Remote Binary Hooks):${RST}"
             echo -e "    ${C_GREEN}[5]${RST}  ♻️  Restart Node Service"
@@ -635,7 +636,7 @@ manage_saved_nodes() {
             echo -e "    ${C_RED}[13]${RST} 💣 Completely Uninstall Node & Clean DNS"
             echo -e "    ${C_GRAY}[0]${RST}   🔙 Back to Node List"
 
-            read -rp "$(echo -e "\n  ${C_PURPLE}▶ Choose Action [0-15]: ${RST}")" N_ACT < /dev/tty
+            read -rp "$(echo -e "\n  ${C_PURPLE}▶ Choose Action [0-16]: ${RST}")" N_ACT < /dev/tty
 
             case "$N_ACT" in
                 1)
@@ -661,6 +662,37 @@ manage_saved_nodes() {
                 4)
                     toggle_node_bbr "$target_ip" "$target_port" "$target_user" "$target_pass" "$target_host"
                     read -rp "  Press [ENTER] to continue..." < /dev/tty
+                    ;;
+                16)
+                    ui_sub_banner
+                    echo -e "  ${BOLD}${C_CYAN}📤 INJECT / OVERWRITE WILDCARD SSL ON NODE: $target_host${RST}\n"
+                    list_domain_profiles
+                    local dc; dc=$(get_domains_count)
+                    if [ "$dc" -eq 0 ]; then
+                        read -rp "  Press [ENTER] to return..." < /dev/tty
+                    else
+                        read -rp "$(echo -e "\n  ${C_PURPLE}▶ Select Domain to Deploy onto this Node [1-$dc, or 0 to cancel]: ${RST}")" SEL_D < /dev/tty
+                        if [[ "$SEL_D" =~ ^[0-9]+$ ]] && [ "$SEL_D" -ge 1 ] && [ "$SEL_D" -le "$dc" ]; then
+                            local chosen_dom; chosen_dom=$(jq -r ".[$((SEL_D - 1))].domain" "$DOMAINS_FILE")
+                            local local_cert="/etc/letsencrypt/live/$chosen_dom/fullchain.pem"
+                            local local_key="/etc/letsencrypt/live/$chosen_dom/privkey.pem"
+
+                            if [ -f "$local_cert" ] && [ -f "$local_key" ]; then
+                                log INFO "Pushing Wildcard SSL for *.$chosen_dom to $target_host ($target_ip)..."
+                                sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$target_user@$target_ip" "mkdir -p /var/lib/pg-node/certs/$chosen_dom"
+                                sshpass -p "$target_pass" scp -P "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$local_cert" "$target_user@$target_ip:/var/lib/pg-node/certs/$chosen_dom/fullchain.pem" >/dev/null
+                                sshpass -p "$target_pass" scp -P "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$local_key" "$target_user@$target_ip:/var/lib/pg-node/certs/$chosen_dom/privkey.pem" >/dev/null
+
+                                sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$target_user@$target_ip" \
+                                    "cp -f /var/lib/pg-node/certs/$chosen_dom/fullchain.pem /var/lib/pg-node/certs/ssl_cert.pem && cp -f /var/lib/pg-node/certs/$chosen_dom/privkey.pem /var/lib/pg-node/certs/ssl_key.pem && docker restart node 2>/dev/null || true; systemctl restart pg-node-service 2>/dev/null || true"
+
+                                log OK "Wildcard SSL for *.$chosen_dom applied successfully to $target_host!"
+                            else
+                                log ERROR "Certificate files for $chosen_dom not found in /etc/letsencrypt/live/$chosen_dom"
+                            fi
+                        fi
+                        read -rp "  Press [ENTER] to continue..." < /dev/tty
+                    fi
                     ;;
                 5)
                     eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node restart -y 2>/dev/null || true'"
