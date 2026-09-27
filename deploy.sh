@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# PasarGuard Multi-Node Auto-Deployer (v8.4 - Multi-SSL Pre-Seeding Edition)
+# PasarGuard Multi-Node Auto-Deployer (v8.5 - Universal Multi-SSL Sync Edition)
 # Developed by Saeed SK (@saeedsk32)
 # ==============================================================================
 
@@ -32,7 +32,7 @@ ui_banner() {
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██████╔╝██║  ███╗${RST}${BOLD}${C_PURPLE}██║  ██║█████╗  ██████╔╝██║     ██║   ██║ ╚████╔╝ ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██╔═══╝ ██║   ██║${RST}${BOLD}${C_PURPLE}██║  ██║██╔══╝  ██╔═══╝ ██║     ██║   ██║  ╚██╔╝  ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██║     ╚██████╔╝${RST}${BOLD}${C_PURPLE}██████╔╝███████╗██║     ███████╗╚██████╔╝   ██║   ${RST}   ${C_CYAN}│${RST}"
-    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v8.4 (Production)${RST}           ${C_CYAN}│${RST}"
+    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v8.5 (Production)${RST}           ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
 }
 
@@ -228,9 +228,7 @@ deploy_new_node() {
     local proto_flag="--use-grpc" proto_str="grpc"
     [ "$PROTO_CHOICE" == "2" ] && { proto_flag="--use-rest"; proto_str="rest"; }
 
-    # =========================================================================
     # MULTI-SSL PRE-SEEDING SELECTION
-    # =========================================================================
     echo -e "\n  ${BOLD}${C_CYAN}🔐 MULTI-SSL INBOUND VAULT PRE-SEEDING:${RST}"
     echo -e "  ${C_GRAY}Select which certificates you want to pre-load onto this node for client inbounds:${RST}"
     local all_domains=()
@@ -258,7 +256,6 @@ deploy_new_node() {
             fi
         done
     fi
-    # اطمینان از اینکه دامنه اصلی حتماً در لیست هست
     local found_base=0
     for d in "${DOMAINS_TO_SEED[@]}"; do [ "$d" == "$base_domain" ] && found_base=1; done
     [ "$found_base" -eq 0 ] && DOMAINS_TO_SEED+=("$base_domain")
@@ -347,7 +344,6 @@ deploy_new_node() {
         "grep -oE '[0-9a-fA-F-]{36}' /opt/pg-node/.env 2>/dev/null || grep -oE '[0-9a-fA-F-]{36}' /etc/systemd/system/pg-node.service 2>/dev/null || echo '$generated_api_key'" | head -n 1)
     token_extracted=${token_extracted:-$generated_api_key}
 
-    # انتقال تمامی گواهی‌های انتخاب‌شده به پوشه اختصاصی روی نود
     log INFO "Pre-seeding selected Wildcard SSL certificates to Multi-SSL Vault..."
     for s_dom in "${DOMAINS_TO_SEED[@]}"; do
         local l_cert="/etc/letsencrypt/live/$s_dom/fullchain.pem"
@@ -360,7 +356,6 @@ deploy_new_node() {
         fi
     done
 
-    # ست کردن گواهی دامنه اصلی به عنوان گواهی سرویس ارتباطی با پنل مستر
     local main_c="/var/lib/pg-node/certs/${base_domain}/fullchain.pem"
     local main_k="/var/lib/pg-node/certs/${base_domain}/privkey.pem"
     sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" \
@@ -405,7 +400,7 @@ add_existing_active_node() {
         return 1
     fi
 
-    read -rp "$(echo -e "\n  ${C_PURPLE}▶ Select Domain Profile [1-$dc]: ${RST}")" D_IDX < /dev/tty
+    read -rp "$(echo -e "\n  ${C_PURPLE}▶ Select Main Domain Profile [1-$dc]: ${RST}")" D_IDX < /dev/tty
     local bdom; bdom=$(jq -r ".[$((D_IDX - 1))].domain" "$DOMAINS_FILE")
     read -rp "  ▶ Node Hostname (e.g. node-DE1): " E_HOST < /dev/tty
     read -rp "  ▶ Primary Server IPv4: " E_IP < /dev/tty
@@ -451,13 +446,65 @@ add_existing_active_node() {
     read -rp "  ▶ Master FQDN Address [e.g. $E_HOST.$bdom]: " E_ADDR < /dev/tty
     E_ADDR=${E_ADDR:-"$E_HOST.$bdom"}
 
+    # =========================================================================
+    # MULTI-SSL SYNC SELECTION FOR EXISTING NODE
+    # =========================================================================
+    echo -e "\n  ${BOLD}${C_CYAN}🔐 MULTI-SSL INBOUND VAULT SYNC FOR THIS NODE:${RST}"
+    echo -e "  ${C_GRAY}Select which certificates you want to push to /var/lib/pg-node/certs/ on this node:${RST}"
+    local all_domains=()
+    while IFS= read -r drow; do
+        all_domains+=("$(echo "$drow" | jq -r '.domain')")
+    done < <(jq -c '.[]' "$DOMAINS_FILE" 2>/dev/null)
+
+    for i in "${!all_domains[@]}"; do
+        echo -e "    ${C_PURPLE}[$((i + 1))]${RST} Wildcard SSL: *.${all_domains[$i]}"
+    done
+    echo -e "    ${C_GREEN}[all]${RST} Push ALL available domain certificates automatically"
+    echo -e "    ${C_GRAY}[none]${RST} Skip pushing certificates (Keep current node certs untouched)"
+
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Select Certificates to Sync [all, none, or 1,2]: ${RST}")" SEED_CHOICE < /dev/tty
+    SEED_CHOICE=${SEED_CHOICE:-all}
+
+    local DOMAINS_TO_SEED=()
+    if [[ "$SEED_CHOICE" =~ ^[aA][lL][lL]$ ]]; then
+        DOMAINS_TO_SEED=("${all_domains[@]}")
+    elif [[ "$SEED_CHOICE" =~ ^[nN][oO][nN][eE]$ ]]; then
+        DOMAINS_TO_SEED=()
+    else
+        IFS=',' read -ra S_PARTS <<< "$SEED_CHOICE"
+        for sp in "${S_PARTS[@]}"; do
+            local clean_sp; clean_sp=$(echo "$sp" | tr -d ' ')
+            if [[ "$clean_sp" =~ ^[0-9]+$ ]] && [ "$clean_sp" -ge 1 ] && [ "$clean_sp" -le "${#all_domains[@]}" ]; then
+                DOMAINS_TO_SEED+=("${all_domains[$((clean_sp - 1))]}")
+            fi
+        done
+    fi
+
+    if [ ${#DOMAINS_TO_SEED[@]} -gt 0 ]; then
+        echo -e "  ${C_BLUE}ℹ Syncing selected Wildcard SSL certificates to remote node...${RST}"
+        for s_dom in "${DOMAINS_TO_SEED[@]}"; do
+            local l_cert="/etc/letsencrypt/live/$s_dom/fullchain.pem"
+            local l_key="/etc/letsencrypt/live/$s_dom/privkey.pem"
+            if [ -f "$l_cert" ] && [ -f "$l_key" ]; then
+                eval "$ssh_c 'mkdir -p /var/lib/pg-node/certs/$s_dom'"
+                sshpass -p "$E_PASS" scp -P "$E_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$l_cert" "$E_USER@$E_IP:/var/lib/pg-node/certs/$s_dom/fullchain.pem" >/dev/null
+                sshpass -p "$E_PASS" scp -P "$E_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$l_key" "$E_USER@$E_IP:/var/lib/pg-node/certs/$s_dom/privkey.pem" >/dev/null
+                log OK "Synchronized certificate: $s_dom"
+            fi
+        done
+    fi
+
     local new_entry
     new_entry=$(jq -n \
         --arg h "$E_HOST" --arg ip "$E_IP" --arg addr "$E_ADDR" \
         --arg sport "$e_sport" --arg aport "$e_aport" --arg proto "$e_proto" \
         --arg tok "$e_tok" --arg bdom "$bdom" --arg upass "$E_PASS" \
         --arg uport "$E_PORT" --arg uusr "$E_USER" \
-        '{hostname: $h, ip: $ip, address: $addr, service_port: ($sport|tonumber), api_port: ($aport|tonumber), protocol: $proto, api_token: $tok, base_domain: $bdom, ssh_pass: $upass, ssh_port: ($uport|tonumber), ssh_user: $uusr, dns_records: [$addr], ssl_domains: [$bdom]}')
+        '{hostname: $h, ip: $ip, address: $addr, service_port: ($sport|tonumber), api_port: ($aport|tonumber), protocol: $proto, api_token: $tok, base_domain: $bdom, ssh_pass: $upass, ssh_port: ($uport|tonumber), ssh_user: $uusr, dns_records: [$addr], ssl_domains: []}')
+
+    for sd in "${DOMAINS_TO_SEED[@]}"; do
+        new_entry=$(echo "$new_entry" | jq --arg sdom "$sd" '.ssl_domains += [$sdom]')
+    done
 
     local tmp_n; tmp_n=$(mktemp)
     jq --argjson ne "$new_entry" '. += [$ne]' "$NODES_FILE" > "$tmp_n" && mv "$tmp_n" "$NODES_FILE"
@@ -900,7 +947,7 @@ node_management_menu() {
         echo -e "  ${C_GRAY}Deploy and orchestrate PasarGuard remote nodes${RST}\n"
         echo -e "  ${C_CYAN}[1]${RST} 🚀 Deploy New Node (Multi-IP, DNS Presets & Round-Robin)"
         echo -e "  ${C_CYAN}[2]${RST} 📋 Manage Saved Nodes (IP Migration, Live BBR & DNS)"
-        echo -e "  ${C_CYAN}[3]${RST} 🔗 Attach Existing Active Node (Auto-Discover Config)"
+        echo -e "  ${C_CYAN}[3]${RST} 🔗 Attach Existing Active Node (Auto-Discover & Multi-SSL Sync)"
         echo -e "  ${C_GRAY}[0]  Back to Main Dashboard${RST}"
         read -rp "$(echo -e "\n  ${C_PURPLE}▶ Select Option [0-3]: ${RST}")" NM_OPT < /dev/tty
         case "$NM_OPT" in
