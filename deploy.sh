@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# PasarGuard Multi-Node Auto-Deployer (v6.9 - Ultra Stable Production Edition)
+# PasarGuard Multi-Node Auto-Deployer (v7.0 - Unified Single-View Edition)
 # Developed by Saeed SK (@saeedsk32)
 # ==============================================================================
 
@@ -33,7 +33,7 @@ ui_banner() {
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██████╔╝██║  ███╗${RST}${BOLD}${C_PURPLE}██║  ██║█████╗  ██████╔╝██║     ██║   ██║ ╚████╔╝ ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██╔═══╝ ██║   ██║${RST}${BOLD}${C_PURPLE}██║  ██║██╔══╝  ██╔═══╝ ██║     ██║   ██║  ╚██╔╝  ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██║     ╚██████╔╝${RST}${BOLD}${C_PURPLE}██████╔╝███████╗██║     ███████╗╚██████╔╝   ██║   ${RST}   ${C_CYAN}│${RST}"
-    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v6.9 (Production)${RST}           ${C_CYAN}│${RST}"
+    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v7.0 (Production)${RST}           ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
 }
 
@@ -144,7 +144,7 @@ toggle_node_bbr() {
 inspect_node_ssl_details() {
     local target_ip="$1" target_port="$2" target_user="$3" target_pass="$4" target_host="$5" target_bdom="$6"
     ui_sub_banner
-    echo -e "  ${BOLD}${C_CYAN}🔐 ADVANCED SSL CERTIFICATE & KEYS INSPECTOR: $target_host${RST}\n"
+    echo -e "  ${BOLD}${C_CYAN}🔐 UNIFIED NODE SSL & CERTIFICATE DASHBOARD: $target_host${RST}\n"
 
     local c_path="/var/lib/pg-node/certs/ssl_cert.pem"
     local k_path="/var/lib/pg-node/certs/ssl_key.pem"
@@ -161,53 +161,56 @@ inspect_node_ssl_details() {
         return
     fi
 
-    local cert_subj cert_issuer cert_san
+    local cert_subj cert_issuer cert_san cert_type
     cert_subj=$(echo "$raw_cert" | openssl x509 -noout -subject 2>/dev/null | sed 's/subject=//')
     cert_issuer=$(echo "$raw_cert" | openssl x509 -noout -issuer 2>/dev/null | sed 's/issuer=//')
     cert_san=$(echo "$raw_cert" | openssl x509 -noout -ext subjectAltName 2>/dev/null | grep -v "X509v3" | tr -d ' ' || echo "N/A")
+    
+    if [[ "$cert_issuer" == *"Let's Encrypt"* ]]; then
+        cert_type="${C_GREEN}● Official Wildcard SSL (Let's Encrypt)${RST}"
+    else
+        cert_type="${C_YELLOW}○ Self-Signed (IP-Only - Causes Hostname Mismatch in Panel)${RST}"
+    fi
 
     echo -e "  ${BOLD}${C_GREEN}╭────────────────────────────────────────────────────────────────────────╮${RST}"
     echo -e "  ${BOLD}${C_GREEN}│                         CERTIFICATE METADATA                           │${RST}"
     echo -e "  ${BOLD}${C_GREEN}├────────────────────────────────────────────────────────────────────────┤${RST}"
-    printf "  ${C_GREEN}│${RST}  Subject Common Name : %-46s ${C_GREEN}│${RST}\n" "${cert_subj:0:46}"
-    printf "  ${C_GREEN}│${RST}  Issuer Authority    : %-46s ${C_GREEN}│${RST}\n" "${cert_issuer:0:46}"
-    printf "  ${C_GREEN}│${RST}  Active SAN Domains  : %-46s ${C_GREEN}│${RST}\n" "${cert_san:0:46}"
+    printf "  ${C_GREEN}│${RST}  Status / Type        : %-60b ${C_GREEN}│${RST}\n" "$cert_type"
+    printf "  ${C_GREEN}│${RST}  Subject Common Name  : %-46s ${C_GREEN}│${RST}\n" "${cert_subj:0:46}"
+    printf "  ${C_GREEN}│${RST}  Issuer Authority     : %-46s ${C_GREEN}│${RST}\n" "${cert_issuer:0:46}"
+    printf "  ${C_GREEN}│${RST}  Active SAN Domains   : %-46s ${C_GREEN}│${RST}\n" "${cert_san:0:46}"
     echo -e "  ${BOLD}${C_GREEN}├────────────────────────────────────────────────────────────────────────┤${RST}"
     echo -e "  ${BOLD}${C_GREEN}│  Remote Physical Storage Locations:                                    │${RST}"
     printf "  ${C_GREEN}│${RST}   • Public Certificate : %-44s ${C_GREEN}│${RST}\n" "$c_path"
     printf "  ${C_GREEN}│${RST}   • Private Key Secret : %-44s ${C_GREEN}│${RST}\n" "$k_path"
-    echo -e "  ${BOLD}${C_GREEN}╰────────────────────────────────────────────────────────────────────────╯${RST}\n"
+    echo -e "  ${BOLD}${C_GREEN}├────────────────────────────────────────────────────────────────────────┤${RST}"
+    echo -e "  ${BOLD}${C_GREEN}│  LEAF PUBLIC CERTIFICATE (Copy directly into PasarGuard Panel):        │${RST}"
+    echo -e "  ${BOLD}${C_GREEN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
+    echo -e "${C_YELLOW}$(echo "$raw_cert" | openssl x509 2>/dev/null || echo "$raw_cert")${RST}\n"
 
-    echo -e "  ${BOLD}${C_YELLOW}[1] 📄 View Public Certificate (For Panel Certificate Box)${RST}"
-    echo -e "  ${BOLD}${C_YELLOW}[2] 🔑 View Private Key (Secret)${RST}"
-    echo -e "  ${BOLD}${C_CYAN}[3] 🔁 Re-apply / Sync Master Wildcard SSL to Node${RST}"
+    echo -e "  ${BOLD}${C_CYAN}[1] 🔁 Overwrite with Master Wildcard SSL (*.${target_bdom})${RST}"
+    echo -e "  ${BOLD}${C_RED}[2] 🔑 Reveal RSA/EC Private Key${RST}"
     echo -e "  ${C_GRAY}[0] 🔙 Back to Node Dashboard${RST}"
-    read -rp "$(echo -e "\n  ${C_PURPLE}▶ Select Option [0-3]: ${RST}")" SSL_VIEW_OPT < /dev/tty
+    read -rp "$(echo -e "\n  ${C_PURPLE}▶ Quick Action [0-2]: ${RST}")" SSL_VIEW_OPT < /dev/tty
 
     case "$SSL_VIEW_OPT" in
         1)
-            echo -e "\n${C_GREEN}----- BEGIN LEAF CERTIFICATE (COPY EXACTLY INTO PANEL) -----${RST}"
-            echo "$raw_cert" | openssl x509 2>/dev/null || echo "$raw_cert"
-            echo -e "${C_GREEN}----- END LEAF CERTIFICATE -----${RST}\n"
-            read -rp "  Press [ENTER] to return..." < /dev/tty
-            ;;
-        2)
-            echo -e "\n${C_RED}----- BEGIN RSA/EC PRIVATE KEY (KEEP SECURE) -----${RST}"
-            echo "$raw_key"
-            echo -e "${C_RED}----- END PRIVATE KEY -----${RST}\n"
-            read -rp "  Press [ENTER] to return..." < /dev/tty
-            ;;
-        3)
-            echo -e "\n  ${C_BLUE}ℹ Syncing /etc/letsencrypt/live/${target_bdom} to remote node...${RST}"
+            echo -e "\n  ${C_BLUE}ℹ Syncing official Let's Encrypt /etc/letsencrypt/live/${target_bdom} to remote node...${RST}"
             if [ -f "/etc/letsencrypt/live/${target_bdom}/fullchain.pem" ]; then
                 sshpass -p "$target_pass" scp -P "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "/etc/letsencrypt/live/${target_bdom}/fullchain.pem" "$target_user@$target_ip:$dom_c_path" >/dev/null
                 sshpass -p "$target_pass" scp -P "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "/etc/letsencrypt/live/${target_bdom}/privkey.pem" "$target_user@$target_ip:$dom_k_path" >/dev/null
                 sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$target_user@$target_ip" "cp -f $dom_c_path $c_path && cp -f $dom_k_path $k_path && docker restart node 2>/dev/null || true; systemctl restart pg-node-service 2>/dev/null || true"
-                log OK "Wildcard SSL re-injected and services restarted."
+                log OK "Wildcard SSL synchronized and applied to node."
             else
-                log ERROR "No wildcard SSL found locally for domain ${target_bdom}"
+                log ERROR "No local Let's Encrypt wildcard certificate found for ${target_bdom}"
             fi
-            read -rp "  Press [ENTER] to return..." < /dev/tty
+            read -rp "  Press [ENTER] to continue..." < /dev/tty
+            ;;
+        2)
+            echo -e "\n${C_RED}----- BEGIN PRIVATE KEY (KEEP SECURE) -----${RST}"
+            echo "$raw_key"
+            echo -e "${C_RED}----- END PRIVATE KEY -----${RST}\n"
+            read -rp "  Press [ENTER] to continue..." < /dev/tty
             ;;
         *) ;;
     esac
@@ -979,7 +982,7 @@ view_logs() {
     read -rp "  Press [ENTER] to return..." < /dev/tty
 }
 
-# بارگذاری دیتابیس‌ها و ابزارهای مورد نیاز
+# بارگذاری اولیه
 init_db
 sudo apt-get install -qq -y jq sshpass curl tar certbot python3 >/dev/null 2>&1
 
