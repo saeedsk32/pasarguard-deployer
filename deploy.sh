@@ -350,10 +350,10 @@ deploy_new_node() {
         "modprobe tcp_bbr 2>/dev/null || true; echo 'net.core.default_qdisc=fq' > /etc/sysctl.d/99-bbr.conf; echo 'net.ipv4.tcp_congestion_control=bbr' >> /etc/sysctl.d/99-bbr.conf; sysctl --system >/dev/null 2>&1; ufw allow $NODE_PORT/tcp; ufw allow $API_PORT/tcp; ufw allow 22/tcp; ufw --force enable >/dev/null 2>&1 || true"
 
     log INFO "Deploying Wildcard SSL keys to remote node..."
-    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" "mkdir -p /var/lib/pg-node/certs/$base_domain /opt/pg-node"
+    sshpass -p "$NODE_SSH_PASS" ssh -t -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" "mkdir -p /var/lib/pg-node/certs/$base_domain /opt/pg-node"
     sshpass -p "$NODE_SSH_PASS" scp -P "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "/etc/letsencrypt/live/$base_domain/fullchain.pem" "$NODE_SSH_USER@$NODE_IP:/var/lib/pg-node/certs/$base_domain/fullchain.pem" >/dev/null
     sshpass -p "$NODE_SSH_PASS" scp -P "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "/etc/letsencrypt/live/$base_domain/privkey.pem" "$NODE_SSH_USER@$NODE_IP:/var/lib/pg-node/certs/$base_domain/privkey.pem" >/dev/null
-    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" "ln -sf /var/lib/pg-node/certs/$base_domain/fullchain.pem /var/lib/pg-node/certs/ssl_cert.pem && ln -sf /var/lib/pg-node/certs/$base_domain/privkey.pem /var/lib/pg-node/certs/ssl_key.pem"
+    sshpass -p "$NODE_SSH_PASS" ssh -t -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" "ln -sf /var/lib/pg-node/certs/$base_domain/fullchain.pem /var/lib/pg-node/certs/ssl_cert.pem && ln -sf /var/lib/pg-node/certs/$base_domain/privkey.pem /var/lib/pg-node/certs/ssl_key.pem"
     log OK "Primary Wildcard SSL transferred."
 
     # استخراج کلیه آی‌پی‌های سرور
@@ -417,17 +417,17 @@ deploy_new_node() {
 
     log INFO "Provisioning PasarGuard Node core on remote server..."
     # پاکسازی ریشه‌ای فایل‌های قدیمی تا ارور node is already installed ندهد
-    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP"         "systemctl stop pg-node 2>/dev/null || true; rm -rf /opt/pg-node /usr/local/bin/pg-node /usr/bin/pg-node /etc/systemd/system/pg-node.service; systemctl daemon-reload 2>/dev/null || true"
+    sshpass -p "$NODE_SSH_PASS" ssh -t -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP"         "systemctl stop pg-node 2>/dev/null || true; rm -rf /opt/pg-node /usr/local/bin/pg-node /usr/bin/pg-node /etc/systemd/system/pg-node.service; systemctl daemon-reload 2>/dev/null || true"
     local generated_api_key
     generated_api_key=$(python3 -c "import uuid; print(uuid.uuid4())")
 
     # دانلود تمیز و اجرای مستقیم نصاب رسمی نود
-    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" \
-        "curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh -o /tmp/pg-node.sh && chmod +x /tmp/pg-node.sh && /tmp/pg-node.sh install $proto_flag --service-port $NODE_PORT --api-port $API_PORT --api-key $generated_api_key --cert-path /var/lib/pg-node/certs/ssl_cert.pem --key-path /var/lib/pg-node/certs/ssl_key.pem -y"
+    sshpass -p "$NODE_SSH_PASS" ssh -t -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" \
+        "curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh -o /tmp/pg-node.sh && chmod +x /tmp/pg-node.sh && /tmp/pg-node.sh install $proto_flag --service-port $NODE_PORT --api-port $API_PORT --api-key $generated_api_key  -y"
 
     sleep 2
     local token_extracted
-    token_extracted=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" \
+    token_extracted=$(sshpass -p "$NODE_SSH_PASS" ssh -t -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" \
         "grep -oE '[0-9a-fA-F-]{36}' /opt/pg-node/.env 2>/dev/null || grep -oE '[0-9a-fA-F-]{36}' /etc/systemd/system/pg-node.service 2>/dev/null || echo '$generated_api_key'" | head -n 1)
     token_extracted=${token_extracted:-$generated_api_key}
 
