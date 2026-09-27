@@ -158,103 +158,147 @@ generate_node_self_signed() {
 inspect_node_ssl_details() {
     local target_ip="$1" target_port="$2" target_user="$3" target_pass="$4" target_host="$5" target_bdom="$6"
     ui_sub_banner
-    echo -e "  ${BOLD}${C_CYAN}🔐 ADVANCED MULTI-SSL INVENTORY & KEY INSPECTOR: $target_host${RST}\n"
-
-    echo -e "  ${C_BLUE}ℹ Scanning /var/lib/pg-node/certs on $target_host...${RST}"
+    echo -e "  ${BOLD}${C_CYAN}🔐 PASARGUARD MULTI-SSL VAULT & FULLCHAIN INSPECTOR${RST}"
+    echo -e "  ${C_GRAY}Server: $target_host ($target_ip) │ Multi-Domain Inbound Ready${RST}
+"
 
     local ssh_c="sshpass -p '$target_pass' ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR $target_user@$target_ip"
 
-    eval "$ssh_c 'mkdir -p /var/lib/pg-node/certs; if [ ! -s /var/lib/pg-node/certs/self_cert.pem ]; then openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -days 3650 -nodes -keyout /var/lib/pg-node/certs/self_key.pem -out /var/lib/pg-node/certs/self_cert.pem -subj \"/CN=$target_ip\" -addext \"subjectAltName=DNS:localhost,IP:127.0.0.1,IP=$target_ip\" 2>/dev/null; fi'" 2>/dev/null
-
-    local remote_list
-    remote_list=$(eval "$ssh_c 'find /var/lib/pg-node/certs -type f \( -name \"*cert*.pem\" -o -name \"fullchain.pem\" \) | grep -v \"privkey\" | sort'")
+    # جمع‌آوری فایل‌های گواهی مستقل
+    local remote_scan
+    remote_scan=$(eval "$ssh_c 'find /var/lib/pg-node/certs -type f \( -name "fullchain.pem" -o -name "self_cert.pem" \) 2>/dev/null | sort'")
 
     local active_hash
     active_hash=$(eval "$ssh_c 'md5sum /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null'" | awk '{print $1}')
 
     local cert_files=()
-    while IFS= read -r line; do
-        if [ -n "$line" ] && [[ "$line" != *"/ssl_cert.pem"* ]]; then
-            cert_files+=("$line")
-        fi
-    done <<< "$remote_list"
+    while IFS= read -r l; do
+        [ -n "$l" ] && cert_files+=("$l")
+    done <<< "$remote_scan"
 
     if [ ${#cert_files[@]} -eq 0 ]; then
-        echo -e "  ${C_RED}✖ No stored SSL certificates found on remote server.${RST}"
+        echo -e "  ${C_RED}✖ No domain certificates loaded in /var/lib/pg-node/certs${RST}"
         read -rp "  Press [ENTER] to return..." < /dev/tty
         return
     fi
 
-    echo -e "  ${BOLD}${C_PURPLE}Discovered SSL Profiles on Remote Node:${RST}\n"
-    local idx=0
+    local c_idx=0
     for cf in "${cert_files[@]}"; do
-        ((idx++))
-        local c_subj c_iss c_san cert_hash
-        c_subj=$(eval "$ssh_c 'openssl x509 -in \"$cf\" -noout -subject 2>/dev/null'" | sed 's/subject=//')
-        c_iss=$(eval "$ssh_c 'openssl x509 -in \"$cf\" -noout -issuer 2>/dev/null'" | sed 's/issuer=//')
-        c_san=$(eval "$ssh_c 'openssl x509 -in \"$cf\" -noout -ext subjectAltName 2>/dev/null'" | grep -v "X509v3" | tr -d ' ' || echo "N/A")
-        cert_hash=$(eval "$ssh_c 'md5sum \"$cf\" 2>/dev/null'" | awk '{print $1}')
-
-        local status_lbl="${C_GRAY}○ Stored (Standby Profile)${RST}"
-        if [ "$cert_hash" == "$active_hash" ] && [ -n "$active_hash" ]; then
-            status_lbl="${C_GREEN}● ACTIVE IN-USE (Mounted to pg-node)${RST}"
-        fi
-
+        ((c_idx++))
         local kf="${cf%/*}/privkey.pem"
         [[ "$cf" == *"self_cert.pem"* ]] && kf="${cf%/*}/self_key.pem"
 
-        local card_title="DOMAIN WILDCARD SSL"
-        [[ "$cf" == *"self_cert.pem"* ]] && card_title="NODE SELF-SIGNED LOCAL CERT"
+        # تفکیک دقیق متاداده و زنجیره به ازای هر فایل
+        local raw_dump
+        raw_dump=$(eval "$ssh_c 'python3 -c "
+import ssl, OpenSSL.crypto as c
+with open(\"$cf\", \"rb\") as f:
+    data = f.read()
+certs = [c.dump_certificate(c.FILETYPE_PEM, x).decode() for x in c.load_pkcs7_data(c.FILETYPE_PEM, data) if False] if False else []
+# پارس دستی استاندارد زنجیره
+blocks = data.decode(errors=\"ignore\").split(\"-----END CERTIFICATE-----\")
+chains = [b + \"-----END CERTIFICATE-----\n\" for b in blocks if \"-----BEGIN CERTIFICATE-----\" in b]
+print(f\"TOTAL_CERTS={len(chains)}\")
+for i, cert_pem in enumerate(chains):
+    import subprocess
+    proc = subprocess.run([\"openssl\", \"x509\", \"-noout\", \"-subject\", \"-issuer\", \"-dates\", \"-ext\", \"subjectAltName\"], input=cert_pem.encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out = proc.stdout.decode()
+    subj = [x for x in out.splitlines() if x.startswith(\"subject=\")]
+    iss = [x for x in out.splitlines() if x.startswith(\"issuer=\")]
+    san = [x for x in out.splitlines() if \"DNS:\" in x or \"IP Address:\" in x]
+    print(f\"CERT_{i}_SUBJ={subj[0] if subj else \"\"}\")
+    print(f\"CERT_{i}_ISS={iss[0] if iss else \"\"}\")
+    print(f\"CERT_{i}_SAN={san[0].strip() if san else \"N/A\"}\")
+" 2>/dev/null'")
+
+        local leaf_subj leaf_iss leaf_san chain_count
+        chain_count=$(echo "$raw_dump" | grep "^TOTAL_CERTS=" | cut -d'=' -f2)
+        chain_count=${chain_count:-1}
+        leaf_subj=$(echo "$raw_dump" | grep "^CERT_0_SUBJ=" | cut -d'=' -f2 | sed 's/subject=//;s/^[ 	]*//')
+        leaf_iss=$(echo "$raw_dump" | grep "^CERT_0_ISS=" | cut -d'=' -f2 | sed 's/issuer=//;s/^[ 	]*//')
+        leaf_san=$(echo "$raw_dump" | grep "^CERT_0_SAN=" | cut -d'=' -f2)
+
+        local current_hash
+        current_hash=$(eval "$ssh_c 'md5sum "$cf" 2>/dev/null'" | awk '{print $1}')
+
+        local role_tag="${C_GRAY}○ Stored Inbound Vault (Available for Xray Inbounds)${RST}"
+        if [ "$current_hash" == "$active_hash" ] && [ -n "$active_hash" ]; then
+            role_tag="${C_GREEN}● ACTIVE PANEL SERVICE SSL (Used for Master Panel Orchestration)${RST}"
+        fi
 
         echo -e "  ${BOLD}${C_GREEN}╭────────────────────────────────────────────────────────────────────────╮${RST}"
-        printf "  ${BOLD}${C_GREEN}│ [CARD %d] %-30s %-30s │${RST}\n" "$idx" "$card_title" "($cf)"
+        printf "  ${BOLD}${C_GREEN}│ [VAULT PROFILE %d] %-52s │${RST}
+" "$c_idx" "$cf"
         echo -e "  ${BOLD}${C_GREEN}├────────────────────────────────────────────────────────────────────────┤${RST}"
-        printf "  ${C_GREEN}│${RST}  Status Engine        : %-60b ${C_GREEN}│${RST}\n" "$status_lbl"
-        printf "  ${C_GREEN}│${RST}  Subject Common Name  : %-46s ${C_GREEN}│${RST}\n" "${c_subj:0:46}"
-        printf "  ${C_GREEN}│${RST}  Issuer Authority     : %-46s ${C_GREEN}│${RST}\n" "${c_iss:0:46}"
-        printf "  ${C_GREEN}│${RST}  SAN Coverage Domains : %-46s ${C_GREEN}│${RST}\n" "${c_san:0:46}"
-        printf "  ${C_GREEN}│${RST}  Public Cert File     : %-46s ${C_GREEN}│${RST}\n" "$cf"
-        printf "  ${C_GREEN}│${RST}  Private Key File     : %-46s ${C_GREEN}│${RST}\n" "$kf"
-        echo -e "  ${BOLD}${C_GREEN}╰────────────────────────────────────────────────────────────────────────╯${RST}\n"
+        printf "  ${C_GREEN}│${RST}  Live Engine Role     : %-60b ${C_GREEN}│${RST}
+" "$role_tag"
+        printf "  ${C_GREEN}│${RST}  Server Leaf Domain   : %-46s ${C_GREEN}│${RST}
+" "${leaf_subj:0:46}"
+        printf "  ${C_GREEN}│${RST}  Issuer CA Authority  : %-46s ${C_GREEN}│${RST}
+" "${leaf_iss:0:46}"
+        printf "  ${C_GREEN}│${RST}  SAN Domains Included : %-46s ${C_GREEN}│${RST}
+" "${leaf_san:0:46}"
+        printf "  ${C_GREEN}│${RST}  Chain Certificate(s) : %-46s ${C_GREEN}│${RST}
+" "$chain_count Level(s) [Leaf + Intermediate CA]"
+        printf "  ${C_GREEN}│${RST}  Xray Cert Path       : %-46s ${C_GREEN}│${RST}
+" "$cf"
+        printf "  ${C_GREEN}│${RST}  Xray Key Path        : %-46s ${C_GREEN}│${RST}
+" "$kf"
+        echo -e "  ${BOLD}${C_GREEN}╰────────────────────────────────────────────────────────────────────────╯${RST}
+"
     done
 
-    echo -e "    ${C_GREEN}[1-${#cert_files[@]}]${RST} ⚡ Switch / Enforce Card [1-${#cert_files[@]}] as Active Node SSL"
-    echo -e "    ${C_CYAN}[P]${RST} 📄 Print Selected Card's Full Certificate (For Panel Box)"
-    echo -e "    ${C_RED}[K]${RST} 🔑 Print Selected Card's Raw Private Key"
+    echo -e "    ${C_CYAN}[1-${#cert_files[@]}]${RST} 📄 View Chain Breakdown & Full Raw PEM for Vault [1-${#cert_files[@]}]"
+    echo -e "    ${C_PURPLE}[S]${RST} ⚡ Switch Master Panel Orchestration SSL to a Specific Profile"
+    echo -e "    ${C_RED}[K]${RST} 🔑 Reveal Private Key of a Profile"
     echo -e "    ${C_GRAY}[0]${RST} 🔙 Back to Node Dashboard"
-    read -rp "$(echo -e "\n  ${C_PURPLE}▶ Action Choice: ${RST}")" M_ACT < /dev/tty
+    read -rp "$(echo -e "
+  ${C_PURPLE}▶ Choice: ${RST}")" V_ACT < /dev/tty
 
-    if [[ "$M_ACT" =~ ^[0-9]+$ ]] && [ "$M_ACT" -ge 1 ] && [ "$M_ACT" -le "${#cert_files[@]}" ]; then
-        local target_c="${cert_files[$((M_ACT - 1))]}"
-        local target_k="${target_c%/*}/privkey.pem"
-        [[ "$target_c" == *"self_cert.pem"* ]] && target_k="${target_c%/*}/self_key.pem"
-
-        echo -e "\n  ${C_BLUE}ℹ Activating $target_c as live node certificate...${RST}"
-        eval "$ssh_c 'cp -f \"$target_c\" /var/lib/pg-node/certs/ssl_cert.pem && cp -f \"$target_k\" /var/lib/pg-node/certs/ssl_key.pem && docker restart node 2>/dev/null || true; systemctl restart pg-node-service 2>/dev/null || true'"
-        log OK "Node certificate switched to $target_c"
-        read -rp "  Press [ENTER] to continue..." < /dev/tty
-    elif [[ "$M_ACT" =~ ^[pP]$ ]]; then
-        read -rp "  ▶ Select Card Number to view certificate [1-${#cert_files[@]}]: " C_NUM < /dev/tty
-        if [[ "$C_NUM" =~ ^[0-9]+$ ]] && [ "$C_NUM" -ge 1 ] && [ "$C_NUM" -le "${#cert_files[@]}" ]; then
-            local sel_cf="${cert_files[$((C_NUM - 1))]}"
-            echo -e "\n${C_GREEN}----- BEGIN CERTIFICATE ($sel_cf) -----${RST}"
-            eval "$ssh_c 'cat \"$sel_cf\" | openssl x509 2>/dev/null || cat \"$sel_cf\"'"
-            echo -e "${C_GREEN}----- END CERTIFICATE -----${RST}\n"
+    if [[ "$V_ACT" =~ ^[0-9]+$ ]] && [ "$V_ACT" -ge 1 ] && [ "$V_ACT" -le "${#cert_files[@]}" ]; then
+        local chosen_cf="${cert_files[$((V_ACT - 1))]}"
+        ui_sub_banner
+        echo -e "  ${BOLD}${C_CYAN}📜 FULLCHAIN BREAKDOWN FOR: $chosen_cf${RST}
+"
+        eval "$ssh_c 'python3 -c "
+with open(\"$chosen_cf\", \"r\") as f:
+    data = f.read()
+parts = [p.strip() for p in data.split(\"-----END CERTIFICATE-----\") if \"-----BEGIN CERTIFICATE-----\" in p]
+for i, p in enumerate(parts):
+    pem = p + \"\n-----END CERTIFICATE-----\n\"
+    label = \"[LEVEL 1: LEAF SERVER CERTIFICATE]\" if i == 0 else f\"[LEVEL {i+1}: INTERMEDIATE CA SIGNER]\"
+    print(f\"\033[38;5;48m{label}\033[0m\")
+    print(pem)
+"'"
+        read -rp "  Press [ENTER] to return..." < /dev/tty
+    elif [[ "$V_ACT" =~ ^[sS]$ ]]; then
+        read -rp "  ▶ Select Profile number to bind to Master Panel [1-${#cert_files[@]}]: " S_NUM < /dev/tty
+        if [[ "$S_NUM" =~ ^[0-9]+$ ]] && [ "$S_NUM" -ge 1 ] && [ "$S_NUM" -le "${#cert_files[@]}" ]; then
+            local sw_cf="${cert_files[$((S_NUM - 1))]}"
+            local sw_kf="${sw_cf%/*}/privkey.pem"
+            [[ "$sw_cf" == *"self_cert.pem"* ]] && sw_kf="${sw_cf%/*}/self_key.pem"
+            echo -e "
+  ${C_BLUE}ℹ Binding $sw_cf to /var/lib/pg-node/certs/ssl_cert.pem...${RST}"
+            eval "$ssh_c 'cp -f "$sw_cf" /var/lib/pg-node/certs/ssl_cert.pem && cp -f "$sw_kf" /var/lib/pg-node/certs/ssl_key.pem && docker restart node 2>/dev/null || true; systemctl restart pg-node-service 2>/dev/null || true'"
+            log OK "Master Panel SSL linked to $sw_cf"
         fi
         read -rp "  Press [ENTER] to continue..." < /dev/tty
-    elif [[ "$M_ACT" =~ ^[kK]$ ]]; then
-        read -rp "  ▶ Select Card Number to view private key [1-${#cert_files[@]}]: " K_NUM < /dev/tty
+    elif [[ "$V_ACT" =~ ^[kK]$ ]]; then
+        read -rp "  ▶ Select Profile number to view private key [1-${#cert_files[@]}]: " K_NUM < /dev/tty
         if [[ "$K_NUM" =~ ^[0-9]+$ ]] && [ "$K_NUM" -ge 1 ] && [ "$K_NUM" -le "${#cert_files[@]}" ]; then
-            local sel_cf="${cert_files[$((K_NUM - 1))]}"
-            local sel_kf="${sel_cf%/*}/privkey.pem"
-            [[ "$sel_cf" == *"self_cert.pem"* ]] && sel_kf="${sel_cf%/*}/self_key.pem"
-            echo -e "\n${C_RED}----- BEGIN PRIVATE KEY ($sel_kf) -----${RST}"
-            eval "$ssh_c 'cat \"$sel_kf\"'"
-            echo -e "${C_RED}----- END PRIVATE KEY -----${RST}\n"
+            local k_target="${cert_files[$((K_NUM - 1))]}"
+            local k_file="${k_target%/*}/privkey.pem"
+            [[ "$k_target" == *"self_cert.pem"* ]] && k_file="${k_target%/*}/self_key.pem"
+            echo -e "
+${C_RED}----- BEGIN PRIVATE KEY ($k_file) -----${RST}"
+            eval "$ssh_c 'cat "$k_file"'"
+            echo -e "${C_RED}----- END PRIVATE KEY -----${RST}
+"
         fi
         read -rp "  Press [ENTER] to continue..." < /dev/tty
     fi
 }
+
 
 manage_node_dns_center() {
     local n_idx="$1"
