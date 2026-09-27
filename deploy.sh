@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# PasarGuard Multi-Node Auto-Deployer (v7.9 - Unified Clean Card Edition)
+# PasarGuard Multi-Node Auto-Deployer (v8.0 - Compact Dual-Piece Vault Edition)
 # Developed by Saeed SK (@saeedsk32)
 # ==============================================================================
 
@@ -33,7 +33,7 @@ ui_banner() {
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██████╔╝██║  ███╗${RST}${BOLD}${C_PURPLE}██║  ██║█████╗  ██████╔╝██║     ██║   ██║ ╚████╔╝ ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██╔═══╝ ██║   ██║${RST}${BOLD}${C_PURPLE}██║  ██║██╔══╝  ██╔═══╝ ██║     ██║   ██║  ╚██╔╝  ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██║     ╚██████╔╝${RST}${BOLD}${C_PURPLE}██████╔╝███████╗██║     ███████╗╚██████╔╝   ██║   ${RST}   ${C_CYAN}│${RST}"
-    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v7.9 (Production)${RST}           ${C_CYAN}│${RST}"
+    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v8.0 (Production)${RST}           ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
 }
 
@@ -158,8 +158,8 @@ generate_node_self_signed() {
 inspect_node_ssl_details() {
     local target_ip="$1" target_port="$2" target_user="$3" target_pass="$4" target_host="$5" target_bdom="$6"
     ui_sub_banner
-    echo -e "  ${BOLD}${C_CYAN}🔐 PASARGUARD MULTI-SSL INVENTORY & LIVE VAULT DASHBOARD${RST}"
-    echo -e "  ${C_GRAY}Server: $target_host ($target_ip) │ Multi-Domain Unified Engine${RST}\n"
+    echo -e "  ${BOLD}${C_CYAN}🔐 PASARGUARD MULTI-SSL VAULT & INBOUND CODES DASHBOARD${RST}"
+    echo -e "  ${C_GRAY}Server: $target_host ($target_ip) │ Clean Dual-Piece Layout${RST}\n"
 
     local ssh_c="sshpass -p '$target_pass' ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR $target_user@$target_ip"
 
@@ -202,33 +202,58 @@ inspect_node_ssl_details() {
         fi
 
         echo -e "  ${BOLD}${C_GREEN}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
-        echo -e "  ${BOLD}${C_GREEN}┃ [VAULT PROFILE $c_idx] $cf${RST}"
+        echo -e "  ${BOLD}${C_GREEN}┃ [PROFILE $c_idx] $cf${RST}"
         echo -e "  ${BOLD}${C_GREEN}┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
-        echo -e "  ${C_GREEN}┃${RST} ${BOLD}Live Role${RST}     : $role_tag"
-        echo -e "  ${C_GREEN}┃${RST} ${BOLD}Subject CN${RST}    : ${C_WHITE}${leaf_subj}${RST}"
-        echo -e "  ${C_GREEN}┃${RST} ${BOLD}Issuer CA${RST}     : ${C_GRAY}${leaf_iss}${RST}"
-        echo -e "  ${C_GREEN}┃${RST} ${BOLD}SAN Domains${RST}   : ${C_CYAN}${leaf_san}${RST}"
-        echo -e "  ${C_GREEN}┃${RST} ${BOLD}Chain Levels${RST}  : ${chain_count} [Leaf + Intermediate CA]"
+        echo -e "  ${C_GREEN}┃${RST} ${BOLD}Live Role${RST}    : $role_tag"
+        echo -e "  ${C_GREEN}┃${RST} ${BOLD}Subject CN${RST}   : ${C_WHITE}${leaf_subj}${RST}"
+        echo -e "  ${C_GREEN}┃${RST} ${BOLD}Issuer CA${RST}    : ${C_GRAY}${leaf_iss}${RST}"
+        echo -e "  ${C_GREEN}┃${RST} ${BOLD}SAN Domains${RST}  : ${C_CYAN}${leaf_san}${RST}"
+        echo -e "  ${C_GREEN}┃${RST} ${BOLD}Chain Levels${RST} : ${chain_count} Levels (Full Intermediate Chain Available)"
         echo -e "  ${BOLD}${C_GREEN}┣━ Option A: File Paths for Inbound ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
-        echo -e "  ${C_GREEN}┃${RST}  • Cert path : ${C_CYAN}${cf}${RST}"
-        echo -e "  ${C_GREEN}┃${RST}  • Key path  : ${C_CYAN}${kf}${RST}"
-        echo -e "  ${BOLD}${C_GREEN}┣━ Option B: 1. CERTIFICATE CONTENT BOX (Copy into Panel) ━━━━━━━━━━━━━━━${RST}"
+        echo -e "  ${C_GREEN}┃${RST}  • Cert file path : ${C_CYAN}${cf}${RST}"
+        echo -e "  ${C_GREEN}┃${RST}  • Key file path  : ${C_CYAN}${kf}${RST}"
+        echo -e "  ${BOLD}${C_GREEN}┣━ Option B: 1. LEAF CERTIFICATE CONTENT (Paste into Panel) ━━━━━━━━━━━━━${RST}"
         echo -e "  ${BOLD}${C_GREEN}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
-        eval "$ssh_c 'cat \"$cf\"'"
+        # چاپ تنها تکه اول و اصلی (Leaf Certificate) برای کپی تمیز
+        eval "$ssh_c 'openssl x509 -in \"$cf\" 2>/dev/null'"
         echo ""
 
-        echo -e "  ${BOLD}${C_RED}┏━ Option B: 2. KEY CONTENT BOX (Copy into Panel) ━━━━━━━━━━━━━━━━━━━━━━━${RST}"
+        echo -e "  ${BOLD}${C_RED}┏━ Option B: 2. KEY CONTENT BOX (Paste into Panel) ━━━━━━━━━━━━━━━━━━━━━━${RST}"
         echo -e "  ${BOLD}${C_RED}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
         eval "$ssh_c 'cat \"$kf\"'"
         echo -e "\n  ${C_GRAY}────────────────────────────────────────────────────────────────────────${RST}\n"
     done
 
     echo -e "  ${BOLD}${C_CYAN}⚡ QUICK CONTROLS:${RST}"
-    echo -e "    ${C_PURPLE}[S]${RST} ⚡ Switch Master Panel Orchestration SSL to a Specific Profile"
-    echo -e "    ${C_GRAY}[0]${RST} 🔙 Back to Node Dashboard"
+    echo -e "    ${C_CYAN}[1-${#cert_files[@]}]${RST} 📜 Deep FullChain Explorer (View all intermediate CA levels)"
+    echo -e "    ${C_PURPLE}[S]${RST}   ⚡ Switch Master Panel Orchestration SSL to a Specific Profile"
+    echo -e "    ${C_GRAY}[0]${RST}   🔙 Back to Node Dashboard"
     read -rp "$(echo -e "\n  ${C_PURPLE}▶ Choice: ${RST}")" V_ACT < /dev/tty
 
-    if [[ "$V_ACT" =~ ^[sS]$ ]]; then
+    if [[ "$V_ACT" =~ ^[0-9]+$ ]] && [ "$V_ACT" -ge 1 ] && [ "$V_ACT" -le "${#cert_files[@]}" ]; then
+        local chosen_cf="${cert_files[$((V_ACT - 1))]}"
+        ui_sub_banner
+        echo -e "  ${BOLD}${C_CYAN}📜 FULLCHAIN BREAKDOWN: $chosen_cf${RST}\n"
+        eval "$ssh_c '
+            mkdir -p /tmp/cert_parts && rm -f /tmp/cert_parts/*
+            csplit -s -z -f /tmp/cert_parts/part_ \"$chosen_cf\" \"/-----BEGIN CERTIFICATE-----/\" \"{*}\" 2>/dev/null
+            level=1
+            for f in /tmp/cert_parts/part_*; do
+                [ -s \"\$f\" ] || continue
+                if [ \$level -eq 1 ]; then
+                    echo -e \"\033[38;5;48m[LEVEL 1: SERVER LEAF CERTIFICATE]\033[0m\"
+                else
+                    echo -e \"\033[38;5;51m[LEVEL \$level: INTERMEDIATE CA CERTIFICATE]\033[0m\"
+                fi
+                openssl x509 -in \"\$f\" -noout -subject -issuer -dates 2>/dev/null
+                cat \"\$f\"
+                echo \"\"
+                ((level++))
+            done
+            rm -rf /tmp/cert_parts
+        '"
+        read -rp "  Press [ENTER] to return to vault..." < /dev/tty
+    elif [[ "$V_ACT" =~ ^[sS]$ ]]; then
         read -rp "  ▶ Select Profile number to bind to Master Panel [1-${#cert_files[@]}]: " S_NUM < /dev/tty
         if [[ "$S_NUM" =~ ^[0-9]+$ ]] && [ "$S_NUM" -ge 1 ] && [ "$S_NUM" -le "${#cert_files[@]}" ]; then
             local sw_cf="${cert_files[$((S_NUM - 1))]}"
@@ -288,7 +313,7 @@ manage_node_dns_center() {
                             upsert_cloudflare_dns "$c_zid" "$c_tok" "$target_fqdn" "$cl_ip" "PG-Node: $t_host | $NEW_TAG"
                             local entry_str="$target_fqdn ($cl_ip)"
                             local tmp_f; tmp_f=$(mktemp)
-                            jq --arg n "$n_idx" --arg e "$entry_str" '.[($n|tonumber)].dns_records += [$e]' "$NODES_FILE" > "$tmp_f" && mv "$tmp_f" "$NODES_FILE"
+                            jq --arg n "$idx_pos" --arg e "$entry_str" '.[($n|tonumber)].dns_records += [$e]' "$NODES_FILE" > "$tmp_f" && mv "$tmp_f" "$NODES_FILE"
                             log OK "Added DNS Record $entry_str"
                         fi
                     done
@@ -712,7 +737,7 @@ manage_saved_nodes() {
             echo -e "  ${BOLD}${C_BLUE}⚡ INFRASTRUCTURE & DOMAIN ACTIONS:${RST}"
             echo -e "    ${C_PURPLE}[1]${RST}  🔁 1-Click Server IP Migration (Auto CF DNS)"
             echo -e "    ${C_PURPLE}[2]${RST}  🌐 Cloudflare DNS Center (Add / Edit / Delete Records)"
-            echo -e "    ${C_PURPLE}[3]${RST}  🔐 Multi-SSL Vault & Inbound Copy Center"
+            echo -e "    ${C_PURPLE}[3]${RST}  🔐 Multi-SSL Vault (Leaf & Key Inline Dashboard)"
             echo -e "    ${C_PURPLE}[4]${RST}  📤 Inject / Overwrite Node SSL with Any Domain"
             echo -e "    ${C_PURPLE}[5]${RST}  🚀 Toggle / Tune TCP BBR Congestion Control"
 
