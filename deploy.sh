@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# PasarGuard Multi-Node Auto-Deployer (v7.2 - Krio Edition)
+# PasarGuard Multi-Node Auto-Deployer (v7.3 - Autonomous Multi-SSL Edition)
 # Developed by Saeed SK (@saeedsk32)
 # ==============================================================================
 
@@ -33,7 +33,7 @@ ui_banner() {
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██████╔╝██║  ███╗${RST}${BOLD}${C_PURPLE}██║  ██║█████╗  ██████╔╝██║     ██║   ██║ ╚████╔╝ ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██╔═══╝ ██║   ██║${RST}${BOLD}${C_PURPLE}██║  ██║██╔══╝  ██╔═══╝ ██║     ██║   ██║  ╚██╔╝  ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██║     ╚██████╔╝${RST}${BOLD}${C_PURPLE}██████╔╝███████╗██║     ███████╗╚██████╔╝   ██║   ${RST}   ${C_CYAN}│${RST}"
-    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v7.2 (Production)${RST}           ${C_CYAN}│${RST}"
+    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v7.3 (Production)${RST}           ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
 }
 
@@ -141,105 +141,105 @@ toggle_node_bbr() {
     esac
 }
 
+generate_node_self_signed() {
+    local target_ip="$1" target_port="$2" target_user="$3" target_pass="$4" target_host="$5"
+    echo -e "\n  ${C_BLUE}ℹ Generating fresh SAN Self-Signed certificate for $target_ip...${RST}"
+    local ssh_c="sshpass -p '$target_pass' ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR $target_user@$target_ip"
+    eval "$ssh_c 'mkdir -p /var/lib/pg-node/certs; openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -days 3650 -nodes -keyout /var/lib/pg-node/certs/self_key.pem -out /var/lib/pg-node/certs/self_cert.pem -subj \"/CN=$target_ip\" -addext \"subjectAltName=DNS:localhost,IP:127.0.0.1,IP:$target_ip\" 2>/dev/null'"
+    read -rp "$(echo -e "  ▶ Make this newly generated Self-Signed cert ACTIVE right now? [y/N]: ${RST}")" ACT_SELF < /dev/tty
+    if [[ "$ACT_SELF" =~ ^[yY]$ ]]; then
+        eval "$ssh_c 'cp -f /var/lib/pg-node/certs/self_cert.pem /var/lib/pg-node/certs/ssl_cert.pem && cp -f /var/lib/pg-node/certs/self_key.pem /var/lib/pg-node/certs/ssl_key.pem && docker restart node 2>/dev/null || true; systemctl restart pg-node-service 2>/dev/null || true'"
+        log OK "Node is now actively using the local Self-Signed certificate."
+    else
+        log OK "Self-Signed cert stored in /var/lib/pg-node/certs/self_cert.pem (Standby)."
+    fi
+}
+
 inspect_node_ssl_details() {
     local target_ip="$1" target_port="$2" target_user="$3" target_pass="$4" target_host="$5" target_bdom="$6"
     ui_sub_banner
-    echo -e "  ${BOLD}${C_CYAN}🔐 ADVANCED MULTI-SSL INVENTORY & KEY INSPECTOR: $target_host${RST}
-"
+    echo -e "  ${BOLD}${C_CYAN}🔐 ADVANCED MULTI-SSL INVENTORY & KEY INSPECTOR: $target_host${RST}\n"
 
     echo -e "  ${C_BLUE}ℹ Scanning /var/lib/pg-node/certs on $target_host...${RST}"
 
-    # بازیابی یا تولید گواهی سلف در صورت نبود
-    sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$target_user@$target_ip"         'mkdir -p /var/lib/pg-node/certs; if [ ! -s /var/lib/pg-node/certs/self_cert.pem ]; then openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -days 3650 -nodes -keyout /var/lib/pg-node/certs/self_key.pem -out /var/lib/pg-node/certs/self_cert.pem -subj "/CN='"$target_ip"'" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP='"$target_ip"'" 2>/dev/null; fi' 2>/dev/null
+    local ssh_c="sshpass -p '$target_pass' ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR $target_user@$target_ip"
 
-    # لیست کردن تمام فایل‌های سرتیفیکیت روی سرور نود
+    eval "$ssh_c 'mkdir -p /var/lib/pg-node/certs; if [ ! -s /var/lib/pg-node/certs/self_cert.pem ]; then openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -days 3650 -nodes -keyout /var/lib/pg-node/certs/self_key.pem -out /var/lib/pg-node/certs/self_cert.pem -subj \"/CN=$target_ip\" -addext \"subjectAltName=DNS:localhost,IP:127.0.0.1,IP=$target_ip\" 2>/dev/null; fi'" 2>/dev/null
+
     local remote_list
-    remote_list=$(sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$target_user@$target_ip"         'find /var/lib/pg-node/certs -type f \( -name "*cert*.pem" -o -name "fullchain.pem" \) | sort' 2>/dev/null)
+    remote_list=$(eval "$ssh_c 'find /var/lib/pg-node/certs -type f \( -name \"*cert*.pem\" -o -name \"fullchain.pem\" \) | grep -v \"privkey\" | sort'")
 
     local active_hash
-    active_hash=$(sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$target_user@$target_ip"         'md5sum /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null' | awk '{print $1}')
+    active_hash=$(eval "$ssh_c 'md5sum /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null'" | awk '{print $1}')
 
     local cert_files=()
     while IFS= read -r line; do
-        [ -n "$line" ] && cert_files+=("$line")
+        if [ -n "$line" ] && [[ "$line" != *"/ssl_cert.pem"* ]]; then
+            cert_files+=("$line")
+        fi
     done <<< "$remote_list"
 
     if [ ${#cert_files[@]} -eq 0 ]; then
-        echo -e "  ${C_RED}✖ No SSL certificates found on remote server.${RST}"
+        echo -e "  ${C_RED}✖ No stored SSL certificates found on remote server.${RST}"
         read -rp "  Press [ENTER] to return..." < /dev/tty
         return
     fi
 
-    echo -e "  ${BOLD}${C_PURPLE}Discovered SSL Certificates on Remote Node:${RST}
-"
+    echo -e "  ${BOLD}${C_PURPLE}Discovered SSL Profiles on Remote Node:${RST}\n"
     local idx=0
     for cf in "${cert_files[@]}"; do
         ((idx++))
-        local raw_info cert_hash is_active
-        raw_info=$(sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$target_user@$target_ip"             "openssl x509 -in '$cf' -noout -subject -issuer -ext subjectAltName 2>/dev/null")
-        cert_hash=$(sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$target_user@$target_ip"             "md5sum '$cf' 2>/dev/null" | awk '{print $1}')
+        local c_subj c_iss c_san cert_hash
+        c_subj=$(eval "$ssh_c 'openssl x509 -in \"$cf\" -noout -subject 2>/dev/null'" | sed 's/subject=//')
+        c_iss=$(eval "$ssh_c 'openssl x509 -in \"$cf\" -noout -issuer 2>/dev/null'" | sed 's/issuer=//')
+        c_san=$(eval "$ssh_c 'openssl x509 -in \"$cf\" -noout -ext subjectAltName 2>/dev/null'" | grep -v "X509v3" | tr -d ' ' || echo "N/A")
+        cert_hash=$(eval "$ssh_c 'md5sum \"$cf\" 2>/dev/null'" | awk '{print $1}')
 
-        local c_subj c_iss c_san
-        c_subj=$(echo "$raw_info" | grep "^subject=" | sed 's/subject=//')
-        c_iss=$(echo "$raw_info" | grep "^issuer=" | sed 's/issuer=//')
-        c_san=$(echo "$raw_info" | grep -A1 "Subject Alternative Name" | tail -n1 | tr -d ' ' || echo "N/A")
-
-        local status_lbl="${C_GRAY}○ Stored (Standby)${RST}"
+        local status_lbl="${C_GRAY}○ Stored (Standby Profile)${RST}"
         if [ "$cert_hash" == "$active_hash" ] && [ -n "$active_hash" ]; then
             status_lbl="${C_GREEN}● ACTIVE IN-USE (Mounted to pg-node)${RST}"
         fi
 
         local kf="${cf%/*}/privkey.pem"
-        [[ "$cf" == *"ssl_cert.pem"* ]] && kf="${cf%/*}/ssl_key.pem"
         [[ "$cf" == *"self_cert.pem"* ]] && kf="${cf%/*}/self_key.pem"
 
+        local card_title="DOMAIN WILDCARD SSL"
+        [[ "$cf" == *"self_cert.pem"* ]] && card_title="NODE SELF-SIGNED LOCAL CERT"
+
         echo -e "  ${BOLD}${C_GREEN}╭────────────────────────────────────────────────────────────────────────╮${RST}"
-        printf "  ${BOLD}${C_GREEN}│ [CARD %d] %-61s │${RST}
-" "$idx" "$cf"
+        printf "  ${BOLD}${C_GREEN}│ [CARD %d] %-30s %-30s │${RST}\n" "$idx" "$card_title" "($cf)"
         echo -e "  ${BOLD}${C_GREEN}├────────────────────────────────────────────────────────────────────────┤${RST}"
-        printf "  ${C_GREEN}│${RST}  Status Engine        : %-60b ${C_GREEN}│${RST}
-" "$status_lbl"
-        printf "  ${C_GREEN}│${RST}  Subject Common Name  : %-46s ${C_GREEN}│${RST}
-" "${c_subj:0:46}"
-        printf "  ${C_GREEN}│${RST}  Issuer Authority     : %-46s ${C_GREEN}│${RST}
-" "${c_iss:0:46}"
-        printf "  ${C_GREEN}│${RST}  SAN Coverage Domains : %-46s ${C_GREEN}│${RST}
-" "${c_san:0:46}"
-        printf "  ${C_GREEN}│${RST}  Public Cert File     : %-46s ${C_GREEN}│${RST}
-" "$cf"
-        printf "  ${C_GREEN}│${RST}  Private Key File     : %-46s ${C_GREEN}│${RST}
-" "$kf"
-        echo -e "  ${BOLD}${C_GREEN}╰────────────────────────────────────────────────────────────────────────╯${RST}
-"
+        printf "  ${C_GREEN}│${RST}  Status Engine        : %-60b ${C_GREEN}│${RST}\n" "$status_lbl"
+        printf "  ${C_GREEN}│${RST}  Subject Common Name  : %-46s ${C_GREEN}│${RST}\n" "${c_subj:0:46}"
+        printf "  ${C_GREEN}│${RST}  Issuer Authority     : %-46s ${C_GREEN}│${RST}\n" "${c_iss:0:46}"
+        printf "  ${C_GREEN}│${RST}  SAN Coverage Domains : %-46s ${C_GREEN}│${RST}\n" "${c_san:0:46}"
+        printf "  ${C_GREEN}│${RST}  Public Cert File     : %-46s ${C_GREEN}│${RST}\n" "$cf"
+        printf "  ${C_GREEN}│${RST}  Private Key File     : %-46s ${C_GREEN}│${RST}\n" "$kf"
+        echo -e "  ${BOLD}${C_GREEN}╰────────────────────────────────────────────────────────────────────────╯${RST}\n"
     done
 
     echo -e "    ${C_GREEN}[1-${#cert_files[@]}]${RST} ⚡ Switch / Enforce Card [1-${#cert_files[@]}] as Active Node SSL"
     echo -e "    ${C_CYAN}[P]${RST} 📄 Print Selected Card's Full Certificate (For Panel Box)"
     echo -e "    ${C_RED}[K]${RST} 🔑 Print Selected Card's Raw Private Key"
     echo -e "    ${C_GRAY}[0]${RST} 🔙 Back to Node Dashboard"
-    read -rp "$(echo -e "
-  ${C_PURPLE}▶ Action Choice: ${RST}")" M_ACT < /dev/tty
+    read -rp "$(echo -e "\n  ${C_PURPLE}▶ Action Choice: ${RST}")" M_ACT < /dev/tty
 
     if [[ "$M_ACT" =~ ^[0-9]+$ ]] && [ "$M_ACT" -ge 1 ] && [ "$M_ACT" -le "${#cert_files[@]}" ]; then
         local target_c="${cert_files[$((M_ACT - 1))]}"
         local target_k="${target_c%/*}/privkey.pem"
-        [[ "$target_c" == *"ssl_cert.pem"* ]] && target_k="${target_c%/*}/ssl_key.pem"
         [[ "$target_c" == *"self_cert.pem"* ]] && target_k="${target_c%/*}/self_key.pem"
 
-        echo -e "
-  ${C_BLUE}ℹ Activating $target_c as live node certificate...${RST}"
-        sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$target_user@$target_ip"             "cp -f '$target_c' /var/lib/pg-node/certs/ssl_cert.pem && cp -f '$target_k' /var/lib/pg-node/certs/ssl_key.pem && docker restart node 2>/dev/null || true; systemctl restart pg-node-service 2>/dev/null || true"
-        log OK "Switched node SSL to $target_c"
+        echo -e "\n  ${C_BLUE}ℹ Activating $target_c as live node certificate...${RST}"
+        eval "$ssh_c 'cp -f \"$target_c\" /var/lib/pg-node/certs/ssl_cert.pem && cp -f \"$target_k\" /var/lib/pg-node/certs/ssl_key.pem && docker restart node 2>/dev/null || true; systemctl restart pg-node-service 2>/dev/null || true'"
+        log OK "Node certificate switched to $target_c"
         read -rp "  Press [ENTER] to continue..." < /dev/tty
     elif [[ "$M_ACT" =~ ^[pP]$ ]]; then
         read -rp "  ▶ Select Card Number to view certificate [1-${#cert_files[@]}]: " C_NUM < /dev/tty
         if [[ "$C_NUM" =~ ^[0-9]+$ ]] && [ "$C_NUM" -ge 1 ] && [ "$C_NUM" -le "${#cert_files[@]}" ]; then
             local sel_cf="${cert_files[$((C_NUM - 1))]}"
-            echo -e "
-${C_GREEN}----- BEGIN CERTIFICATE ($sel_cf) -----${RST}"
-            sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$target_user@$target_ip" "cat '$sel_cf' | openssl x509 2>/dev/null || cat '$sel_cf'"
-            echo -e "${C_GREEN}----- END CERTIFICATE -----${RST}
-"
+            echo -e "\n${C_GREEN}----- BEGIN CERTIFICATE ($sel_cf) -----${RST}"
+            eval "$ssh_c 'cat \"$sel_cf\" | openssl x509 2>/dev/null || cat \"$sel_cf\"'"
+            echo -e "${C_GREEN}----- END CERTIFICATE -----${RST}\n"
         fi
         read -rp "  Press [ENTER] to continue..." < /dev/tty
     elif [[ "$M_ACT" =~ ^[kK]$ ]]; then
@@ -247,13 +247,10 @@ ${C_GREEN}----- BEGIN CERTIFICATE ($sel_cf) -----${RST}"
         if [[ "$K_NUM" =~ ^[0-9]+$ ]] && [ "$K_NUM" -ge 1 ] && [ "$K_NUM" -le "${#cert_files[@]}" ]; then
             local sel_cf="${cert_files[$((K_NUM - 1))]}"
             local sel_kf="${sel_cf%/*}/privkey.pem"
-            [[ "$sel_cf" == *"ssl_cert.pem"* ]] && sel_kf="${sel_cf%/*}/ssl_key.pem"
             [[ "$sel_cf" == *"self_cert.pem"* ]] && sel_kf="${sel_cf%/*}/self_key.pem"
-            echo -e "
-${C_RED}----- BEGIN PRIVATE KEY ($sel_kf) -----${RST}"
-            sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$target_user@$target_ip" "cat '$sel_kf'"
-            echo -e "${C_RED}----- END PRIVATE KEY -----${RST}
-"
+            echo -e "\n${C_RED}----- BEGIN PRIVATE KEY ($sel_kf) -----${RST}"
+            eval "$ssh_c 'cat \"$sel_kf\"'"
+            echo -e "${C_RED}----- END PRIVATE KEY -----${RST}\n"
         fi
         read -rp "  Press [ENTER] to continue..." < /dev/tty
     fi
@@ -354,7 +351,7 @@ manage_node_dns_center() {
                         del_ip=$(echo "$del_entry" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+')
                         local rtype="A"; [[ "$del_ip" == *:* ]] && rtype="AAAA"
                         local rec_id
-                        rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?name=$del_fqdn&type=$rtype&content=$del_ip" \
+                        rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records?name=$del_fqdn&type=$rtype&content=$del_ip" \
                              -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty' 2>/dev/null)
                         [ -n "$rec_id" ] && curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records/$rec_id" -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" >/dev/null
                         local tmp_del; tmp_del=$(mktemp)
@@ -460,9 +457,9 @@ deploy_new_node() {
         "modprobe tcp_bbr 2>/dev/null || true; echo 'net.core.default_qdisc=fq' > /etc/sysctl.d/99-bbr.conf; echo 'net.ipv4.tcp_congestion_control=bbr' >> /etc/sysctl.d/99-bbr.conf; sysctl --system >/dev/null 2>&1; ufw allow $NODE_PORT/tcp; ufw allow $API_PORT/tcp; ufw allow 22/tcp; ufw --force enable >/dev/null 2>&1 || true"
 
     log INFO "Deploying Wildcard SSL keys to remote node..."
-    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" "mkdir -p /var/lib/pg-node/certs/$base_domain /opt/pg-node"
-    sshpass -p "$NODE_SSH_PASS" scp -P "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "/etc/letsencrypt/live/$base_domain/fullchain.pem" "$NODE_SSH_USER@$NODE_IP:/var/lib/pg-node/certs/$base_domain/fullchain.pem" >/dev/null
-    sshpass -p "$NODE_SSH_PASS" scp -P "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "/etc/letsencrypt/live/$base_domain/privkey.pem" "$NODE_SSH_USER@$NODE_IP:/var/lib/pg-node/certs/$base_domain/privkey.pem" >/dev/null
+    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" "mkdir -p /var/lib/pg-node/certs/$base_domain /opt/pg-node"
+    sshpass -p "$NODE_SSH_PASS" scp -P "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "/etc/letsencrypt/live/$base_domain/fullchain.pem" "$NODE_SSH_USER@$NODE_IP:/var/lib/pg-node/certs/$base_domain/fullchain.pem" >/dev/null
+    sshpass -p "$NODE_SSH_PASS" scp -P "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "/etc/letsencrypt/live/$base_domain/privkey.pem" "$NODE_SSH_USER@$NODE_IP:/var/lib/pg-node/certs/$base_domain/privkey.pem" >/dev/null
     log OK "Primary Wildcard SSL transferred to /var/lib/pg-node/certs/$base_domain."
 
     local all_v4_ips=("$NODE_IP")
@@ -526,12 +523,12 @@ deploy_new_node() {
     local remote_c="/var/lib/pg-node/certs/${base_domain}/fullchain.pem"
     local remote_k="/var/lib/pg-node/certs/${base_domain}/privkey.pem"
 
-    sshpass -p "$NODE_SSH_PASS" ssh -t -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" \
+    sshpass -p "$NODE_SSH_PASS" ssh -t -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" \
         "echo -e 'y\ny' | pg-node uninstall 2>/dev/null || true; docker rm -f node 2>/dev/null || true; systemctl stop pg-node pg-node-service 2>/dev/null || true; rm -rf /opt/pg-node /usr/local/bin/pg-node /usr/bin/pg-node /etc/systemd/system/pg-node*.service; systemctl daemon-reload 2>/dev/null || true; curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh -o /tmp/pg-node.sh && chmod +x /tmp/pg-node.sh && /tmp/pg-node.sh install $proto_flag --service-port $NODE_PORT --api-port $API_PORT --api-key $generated_api_key -y; cp -f /var/lib/pg-node/certs/ssl_cert.pem /var/lib/pg-node/certs/self_cert.pem 2>/dev/null || true; cp -f /var/lib/pg-node/certs/ssl_key.pem /var/lib/pg-node/certs/self_key.pem 2>/dev/null || true; cp -f $remote_c /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || true; cp -f $remote_k /var/lib/pg-node/certs/ssl_key.pem 2>/dev/null || true; docker restart node 2>/dev/null || true; systemctl restart pg-node-service 2>/dev/null || true"
 
     sleep 2
     local token_extracted
-    token_extracted=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" \
+    token_extracted=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" \
         "grep -oE '[0-9a-fA-F-]{36}' /opt/pg-node/.env 2>/dev/null || grep -oE '[0-9a-fA-F-]{36}' /etc/systemd/system/pg-node.service 2>/dev/null || echo '$generated_api_key'" | head -n 1)
     token_extracted=${token_extracted:-$generated_api_key}
 
@@ -563,7 +560,7 @@ deploy_new_node() {
 
 add_existing_active_node() {
     ui_banner
-    echo -e "  ${BOLD}${C_CYAN}🔗 ATTACH AN EXISTING ALREADY-DEPLOYED NODE${RST}\n"
+    echo -e "  ${BOLD}${C_CYAN}🔗 ATTACH & AUTO-DISCOVER AN EXISTING ACTIVE NODE${RST}\n"
     list_domain_profiles
     local dc; dc=$(get_domains_count)
     if [ "$dc" -eq 0 ]; then
@@ -575,14 +572,6 @@ add_existing_active_node() {
     local bdom; bdom=$(jq -r ".[$((D_IDX - 1))].domain" "$DOMAINS_FILE")
     read -rp "  ▶ Node Hostname (e.g. node-DE1): " E_HOST < /dev/tty
     read -rp "  ▶ Primary Server IPv4: " E_IP < /dev/tty
-    read -rp "  ▶ Master FQDN Address (e.g. de1.$bdom): " E_ADDR < /dev/tty
-    read -rp "  ▶ Service Port [62050]: " E_SPORT < /dev/tty
-    E_SPORT=${E_SPORT:-62050}
-    read -rp "  ▶ API Port [62051]: " E_APORT < /dev/tty
-    E_APORT=${E_APORT:-62051}
-    read -rp "  ▶ API Key (UUID): " E_TOK < /dev/tty
-    read -rp "  ▶ Protocol [grpc/rest] [grpc]: " E_PROTO < /dev/tty
-    E_PROTO=${E_PROTO:-grpc}
     read -rp "  ▶ Remote SSH Port [22]: " E_PORT < /dev/tty
     E_PORT=${E_PORT:-22}
     read -rp "  ▶ Remote SSH User [root]: " E_USER < /dev/tty
@@ -590,17 +579,52 @@ add_existing_active_node() {
     read -srp "  ▶ Remote SSH Password: " E_PASS < /dev/tty
     echo ""
 
+    echo -e "\n  ${C_BLUE}ℹ Connecting to $E_IP:$E_PORT to auto-discover configuration...${RST}"
+    local ssh_c="sshpass -p '$E_PASS' ssh -p $E_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR $E_USER@$E_IP"
+
+    local disc_data
+    disc_data=$(eval "$ssh_c '
+        echo \"===CONF===\"
+        cat /opt/pg-node/.env 2>/dev/null
+        echo \"===SERVICE===\"
+        cat /etc/systemd/system/pg-node-service.service 2>/dev/null
+        echo \"===PORTS===\"
+        ss -tlpn 2>/dev/null
+    '")
+
+    local e_tok e_sport e_aport e_proto
+    e_tok=$(echo "$disc_data" | grep -oE '[0-9a-fA-F-]{36}' | head -n1)
+    e_sport=$(echo "$disc_data" | grep "^SERVICE_PORT=" | cut -d'=' -f2 | tr -d ' \r')
+    e_aport=$(echo "$disc_data" | grep "^API_PORT=" | cut -d'=' -f2 | tr -d ' \r')
+    e_proto=$(echo "$disc_data" | grep -iq "grpc" && echo "grpc" || echo "rest")
+
+    e_sport=${e_sport:-62050}
+    e_aport=${e_aport:-62051}
+
+    echo -e "  ${C_GREEN}✔ Discovered Configuration:${RST}"
+    echo -e "    • API Key Secret : ${C_YELLOW}${e_tok:-Manual Entry Required}${RST}"
+    echo -e "    • Service Port   : ${C_YELLOW}${e_sport}${RST}"
+    echo -e "    • API Port       : ${C_YELLOW}${e_aport}${RST}"
+    echo -e "    • Protocol       : ${C_YELLOW}${e_proto^^}${RST}"
+
+    if [ -z "$e_tok" ]; then
+        read -rp "  ▶ Enter API Key manually: " e_tok < /dev/tty
+    fi
+
+    read -rp "  ▶ Master FQDN Address [e.g. $E_HOST.$bdom]: " E_ADDR < /dev/tty
+    E_ADDR=${E_ADDR:-"$E_HOST.$bdom"}
+
     local new_entry
     new_entry=$(jq -n \
         --arg h "$E_HOST" --arg ip "$E_IP" --arg addr "$E_ADDR" \
-        --arg sport "$E_SPORT" --arg aport "$E_APORT" --arg proto "$E_PROTO" \
-        --arg tok "$E_TOK" --arg bdom "$bdom" --arg upass "$E_PASS" \
+        --arg sport "$e_sport" --arg aport "$e_aport" --arg proto "$e_proto" \
+        --arg tok "$e_tok" --arg bdom "$bdom" --arg upass "$E_PASS" \
         --arg uport "$E_PORT" --arg uusr "$E_USER" \
         '{hostname: $h, ip: $ip, address: $addr, service_port: ($sport|tonumber), api_port: ($aport|tonumber), protocol: $proto, api_token: $tok, base_domain: $bdom, ssh_pass: $upass, ssh_port: ($uport|tonumber), ssh_user: $uusr, dns_records: [$addr], ssl_domains: [$bdom]}')
 
     local tmp_n; tmp_n=$(mktemp)
     jq --argjson ne "$new_entry" '. += [$ne]' "$NODES_FILE" > "$tmp_n" && mv "$tmp_n" "$NODES_FILE"
-    log OK "Existing node $E_HOST attached to inventory."
+    log OK "Existing node $E_HOST attached and synchronized."
     read -rp "  Press [ENTER] to return to dashboard..." < /dev/tty
 }
 
@@ -652,7 +676,7 @@ manage_saved_nodes() {
             
             local bbr_status="${C_GRAY}Unknown${RST}"
             local active_cc
-            active_cc=$(sshpass -p "$target_pass" ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 "$target_user@$target_ip" "sysctl -n net.ipv4.tcp_congestion_control" 2>/dev/null)
+            active_cc=$(sshpass -p "$target_pass" ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=2 "$target_user@$target_ip" "sysctl -n net.ipv4.tcp_congestion_control" 2>/dev/null)
             if [[ "$active_cc" == *"bbr"* ]]; then
                 bbr_status="${C_GREEN}● Active (BBR + FQ)${RST}"
             elif [ -n "$active_cc" ]; then
@@ -663,13 +687,13 @@ manage_saved_nodes() {
 
             local panel_status="${C_GREEN}● Online (API Listening)${RST}"
             local port_check
-            port_check=$(sshpass -p "$target_pass" ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 "$target_user@$target_ip" "ss -tlpn | grep -q $target_aport && echo OK || echo FAIL" 2>/dev/null)
+            port_check=$(sshpass -p "$target_pass" ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=2 "$target_user@$target_ip" "ss -tlpn | grep -q $target_aport && echo OK || echo FAIL" 2>/dev/null)
             if [ "$port_check" != "OK" ]; then
                 panel_status="${C_YELLOW}○ Standby / Checking${RST}"
             fi
 
             local _remote_cert _leaf_cert
-            _remote_cert=$(sshpass -p "$target_pass" ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 "$target_user@$target_ip" "cat /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || cat /var/lib/pg-node/certs/${target_bdom}/fullchain.pem 2>/dev/null" 2>/dev/null || true)
+            _remote_cert=$(sshpass -p "$target_pass" ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=2 "$target_user@$target_ip" "cat /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || cat /var/lib/pg-node/certs/${target_bdom}/fullchain.pem 2>/dev/null" 2>/dev/null || true)
             if [ -n "$_remote_cert" ]; then
                 _leaf_cert=$(echo "$_remote_cert" | openssl x509 2>/dev/null || echo "$_remote_cert")
             else
@@ -702,7 +726,7 @@ manage_saved_nodes() {
             echo -e "  ${BOLD}${C_BLUE}⚡ INFRASTRUCTURE & DOMAIN ACTIONS:${RST}"
             echo -e "    ${C_PURPLE}[1]${RST}  🔁 1-Click Server IP Migration (Auto CF DNS)"
             echo -e "    ${C_PURPLE}[2]${RST}  🌐 Cloudflare DNS Center (Add / Edit / Delete Records)"
-            echo -e "    ${C_PURPLE}[3]${RST}  🔐 Fullcard SSL Inspector (Cert, Key & Self-Signed)"
+            echo -e "    ${C_PURPLE}[3]${RST}  🔐 Multi-SSL Inspector (Scan, Switch & Keys Explorer)"
             echo -e "    ${C_PURPLE}[4]${RST}  📤 Inject / Overwrite Node SSL with Any Domain"
             echo -e "    ${C_PURPLE}[5]${RST}  🚀 Toggle / Tune TCP BBR Congestion Control"
 
@@ -710,19 +734,20 @@ manage_saved_nodes() {
             echo -e "    ${C_GREEN}[6]${RST}  ♻️  Restart Node Service"
             echo -e "    ${C_GREEN}[7]${RST}  📜 Follow Live Node Logs (Ctrl+C to exit)"
             echo -e "    ${C_GREEN}[8]${RST}  ⚡ Switch Protocol (gRPC <-> REST)"
-            echo -e "    ${C_GREEN}[9]${RST}  ⚙️  Manage Systemd Service"
-            echo -e "    ${C_GREEN}[10]${RST} 📦 Update / Change Xray-core"
-            echo -e "    ${C_GREEN}[11]${RST} 🔄 Update PasarGuard Node Software"
-            echo -e "    ${C_GREEN}[12]${RST} 🗺️  Update GeoFiles (GeoIP & GeoSite)"
-            echo -e "    ${C_GREEN}[13]${RST} 🔑 Set / Regenerate Node API Key"
-            echo -e "    ${C_GREEN}[14]${RST} 🔌 Reconfigure Ports (Service & API)"
+            echo -e "    ${C_GREEN}[9]${RST}  🛡️  Regenerate Node Self-Signed SSL (SAN Enabled)"
+            echo -e "    ${C_GREEN}[10]${RST} ⚙️  Manage Systemd Service"
+            echo -e "    ${C_GREEN}[11]${RST} 📦 Update / Change Xray-core"
+            echo -e "    ${C_GREEN}[12]${RST} 🔄 Update PasarGuard Node Software"
+            echo -e "    ${C_GREEN}[13]${RST} 🗺️  Update GeoFiles (GeoIP & GeoSite)"
+            echo -e "    ${C_GREEN}[14]${RST} 🔑 Set / Regenerate Node API Key"
+            echo -e "    ${C_GREEN}[15]${RST} 🔌 Reconfigure Ports (Service & API)"
 
             echo -e "\n  ${BOLD}${C_RED}🗑️  DANGER ZONE & CLEANUP:${RST}"
-            echo -e "    ${C_GRAY}[15]${RST} 🗑️  Delete from Local Inventory Only"
-            echo -e "    ${C_RED}[16]${RST} 💣 Completely Uninstall Node & Clean DNS"
+            echo -e "    ${C_GRAY}[16]${RST} 🗑️  Delete from Local Inventory Only"
+            echo -e "    ${C_RED}[17]${RST} 💣 Completely Uninstall Node & Clean DNS"
             echo -e "    ${C_GRAY}[0]${RST}   🔙 Back to Node List"
 
-            read -rp "$(echo -e "\n  ${C_PURPLE}▶ Choose Action [0-16]: ${RST}")" N_ACT < /dev/tty
+            read -rp "$(echo -e "\n  ${C_PURPLE}▶ Choose Action [0-17]: ${RST}")" N_ACT < /dev/tty
 
             case "$N_ACT" in
                 1)
@@ -761,11 +786,11 @@ manage_saved_nodes() {
 
                             if [ -f "$local_cert" ] && [ -f "$local_key" ]; then
                                 log INFO "Pushing Wildcard SSL for *.$chosen_dom to $target_host ($target_ip)..."
-                                sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$target_user@$target_ip" "mkdir -p /var/lib/pg-node/certs/$chosen_dom"
-                                sshpass -p "$target_pass" scp -P "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$local_cert" "$target_user@$target_ip:/var/lib/pg-node/certs/$chosen_dom/fullchain.pem" >/dev/null
-                                sshpass -p "$target_pass" scp -P "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$local_key" "$target_user@$target_ip:/var/lib/pg-node/certs/$chosen_dom/privkey.pem" >/dev/null
+                                sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$target_user@$target_ip" "mkdir -p /var/lib/pg-node/certs/$chosen_dom"
+                                sshpass -p "$target_pass" scp -P "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$local_cert" "$target_user@$target_ip:/var/lib/pg-node/certs/$chosen_dom/fullchain.pem" >/dev/null
+                                sshpass -p "$target_pass" scp -P "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$local_key" "$target_user@$target_ip:/var/lib/pg-node/certs/$chosen_dom/privkey.pem" >/dev/null
 
-                                sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$target_user@$target_ip" \
+                                sshpass -p "$target_pass" ssh -p "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$target_user@$target_ip" \
                                     "cp -f /var/lib/pg-node/certs/$chosen_dom/fullchain.pem /var/lib/pg-node/certs/ssl_cert.pem && cp -f /var/lib/pg-node/certs/$chosen_dom/privkey.pem /var/lib/pg-node/certs/ssl_key.pem && docker restart node 2>/dev/null || true; systemctl restart pg-node-service 2>/dev/null || true"
 
                                 log OK "Wildcard SSL for *.$chosen_dom applied successfully to $target_host!"
@@ -802,22 +827,26 @@ manage_saved_nodes() {
                     read -rp "  Press [ENTER] to continue..." < /dev/tty
                     ;;
                 9)
-                    eval "$ssh_cmd -t 'export PATH=/usr/local/bin:\$PATH; pg-node service'"
+                    generate_node_self_signed "$target_ip" "$target_port" "$target_user" "$target_pass" "$target_host"
+                    read -rp "  Press [ENTER] to continue..." < /dev/tty
                     ;;
                 10)
-                    eval "$ssh_cmd -t 'export PATH=/usr/local/bin:\$PATH; pg-node xray'"
+                    eval "$ssh_cmd -t 'export PATH=/usr/local/bin:\$PATH; pg-node service'"
                     ;;
                 11)
+                    eval "$ssh_cmd -t 'export PATH=/usr/local/bin:\$PATH; pg-node xray'"
+                    ;;
+                12)
                     eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node update -y 2>/dev/null || true'"
                     log OK "PasarGuard node software update triggered."
                     read -rp "  Press [ENTER] to continue..." < /dev/tty
                     ;;
-                12)
+                13)
                     eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node geo -y 2>/dev/null || true'"
                     log OK "GeoFiles updated on remote node."
                     read -rp "  Press [ENTER] to continue..." < /dev/tty
                     ;;
-                13)
+                14)
                     read -rp "  ▶ Enter New API Key (Leave empty to auto-generate UUID): " NEW_MANUAL_KEY < /dev/tty
                     if [ -z "$NEW_MANUAL_KEY" ]; then
                         NEW_MANUAL_KEY=$(python3 -c "import uuid; print(uuid.uuid4())")
@@ -829,7 +858,7 @@ manage_saved_nodes() {
                     log OK "API Key successfully updated to $NEW_MANUAL_KEY"
                     read -rp "  Press [ENTER] to continue..." < /dev/tty
                     ;;
-                14)
+                15)
                     read -rp "  ▶ New Service Port (Node Port) [$target_sport]: " NEW_SPORT < /dev/tty
                     NEW_SPORT=${NEW_SPORT:-$target_sport}
                     read -rp "  ▶ New API Port [$target_aport]: " NEW_APORT < /dev/tty
@@ -843,14 +872,14 @@ manage_saved_nodes() {
                     log OK "Ports updated: Service Port = $NEW_SPORT | API Port = $NEW_APORT"
                     read -rp "  Press [ENTER] to continue..." < /dev/tty
                     ;;
-                15)
+                16)
                     local tmp_d; tmp_d=$(mktemp)
                     jq "del(.[$idx_pos])" "$NODES_FILE" > "$tmp_d" && mv "$tmp_d" "$NODES_FILE"
                     log OK "Node removed from local inventory."
                     read -rp "  Press [ENTER] to continue..." < /dev/tty
                     break
                     ;;
-                16)
+                17)
                     read -rp "  Type 'yes' to completely uninstall node and clean DNS: " PURGE_C < /dev/tty
                     if [ "$PURGE_C" == "yes" ]; then
                         eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; echo -e \"y\\ny\" | pg-node uninstall 2>/dev/null || true; docker rm -f node 2>/dev/null || true; systemctl stop pg-node pg-node-service 2>/dev/null || true; rm -rf /opt/pg-node /var/lib/pg-node /usr/local/bin/pg-node /usr/bin/pg-node /etc/systemd/system/pg-node*.service; systemctl daemon-reload 2>/dev/null || true; ufw delete allow $target_sport/tcp 2>/dev/null || true'"
@@ -890,7 +919,7 @@ node_management_menu() {
         echo -e "  ${C_GRAY}Deploy and orchestrate PasarGuard remote nodes${RST}\n"
         echo -e "  ${C_CYAN}[1]${RST} 🚀 Deploy New Node (Multi-IP, DNS Presets & Round-Robin)"
         echo -e "  ${C_CYAN}[2]${RST} 📋 Manage Saved Nodes (IP Migration, Live BBR & DNS)"
-        echo -e "  ${C_CYAN}[3]${RST} 🔗 Attach Existing Active Node (No Re-install)"
+        echo -e "  ${C_CYAN}[3]${RST} 🔗 Attach Existing Active Node (Auto-Discover Config)"
         echo -e "  ${C_GRAY}[0]  Back to Main Dashboard${RST}"
         read -rp "$(echo -e "\n  ${C_PURPLE}▶ Select Option [0-3]: ${RST}")" NM_OPT < /dev/tty
         case "$NM_OPT" in
@@ -1100,7 +1129,7 @@ view_logs() {
     read -rp "  Press [ENTER] to return..." < /dev/tty
 }
 
-# Inishalayshɔn
+# اجرای اولیه
 init_db
 sudo apt-get install -qq -y jq sshpass curl tar certbot python3 >/dev/null 2>&1
 
