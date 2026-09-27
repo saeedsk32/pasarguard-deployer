@@ -425,6 +425,8 @@ deploy_new_node() {
     sshpass -p "$NODE_SSH_PASS" ssh -t -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" \
         "curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh -o /tmp/pg-node.sh && chmod +x /tmp/pg-node.sh && /tmp/pg-node.sh install $proto_flag --service-port $NODE_PORT --api-port $API_PORT --api-key $generated_api_key  -y"
 
+        # فعال‌سازی سرتیفیکیت رسمی و معتبر دامنه به جای Self-Signed تا خطای Hostname Mismatch رفع شود
+    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP"         "cp -f /var/lib/pg-node/certs/$base_domain/fullchain.pem /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || true; cp -f /var/lib/pg-node/certs/$base_domain/privkey.pem /var/lib/pg-node/certs/ssl_key.pem 2>/dev/null || true; docker restart node 2>/dev/null || true; systemctl restart pg-node pg-node-service 2>/dev/null || true"
     sleep 2
     local token_extracted
     token_extracted=$(sshpass -p "$NODE_SSH_PASS" ssh -t -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$NODE_SSH_USER@$NODE_IP" \
