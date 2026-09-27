@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# PasarGuard Multi-Node Auto-Deployer (v7.7 - Inbound Dual-Box Edition)
+# PasarGuard Multi-Node Auto-Deployer (v7.9 - Unified Clean Card Edition)
 # Developed by Saeed SK (@saeedsk32)
 # ==============================================================================
 
@@ -33,7 +33,7 @@ ui_banner() {
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██████╔╝██║  ███╗${RST}${BOLD}${C_PURPLE}██║  ██║█████╗  ██████╔╝██║     ██║   ██║ ╚████╔╝ ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██╔═══╝ ██║   ██║${RST}${BOLD}${C_PURPLE}██║  ██║██╔══╝  ██╔═══╝ ██║     ██║   ██║  ╚██╔╝  ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██║     ╚██████╔╝${RST}${BOLD}${C_PURPLE}██████╔╝███████╗██║     ███████╗╚██████╔╝   ██║   ${RST}   ${C_CYAN}│${RST}"
-    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v7.7 (Production)${RST}           ${C_CYAN}│${RST}"
+    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v7.9 (Production)${RST}           ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
 }
 
@@ -158,8 +158,8 @@ generate_node_self_signed() {
 inspect_node_ssl_details() {
     local target_ip="$1" target_port="$2" target_user="$3" target_pass="$4" target_host="$5" target_bdom="$6"
     ui_sub_banner
-    echo -e "  ${BOLD}${C_CYAN}🔐 PASARGUARD MULTI-SSL VAULT & INBOUND KEYS EXPLORER${RST}"
-    echo -e "  ${C_GRAY}Server: $target_host ($target_ip) │ Ready for Multiple Domains & Inbounds${RST}\n"
+    echo -e "  ${BOLD}${C_CYAN}🔐 PASARGUARD MULTI-SSL INVENTORY & LIVE VAULT DASHBOARD${RST}"
+    echo -e "  ${C_GRAY}Server: $target_host ($target_ip) │ Multi-Domain Unified Engine${RST}\n"
 
     local ssh_c="sshpass -p '$target_pass' ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR $target_user@$target_ip"
 
@@ -201,48 +201,34 @@ inspect_node_ssl_details() {
             role_tag="${C_GREEN}● ACTIVE PANEL SERVICE SSL (Used for Master Panel Orchestration)${RST}"
         fi
 
-        echo -e "  ${BOLD}${C_GREEN}╭────────────────────────────────────────────────────────────────────────╮${RST}"
-        printf "  ${BOLD}${C_GREEN}│ [VAULT PROFILE %d] %-52s │${RST}\n" "$c_idx" "$cf"
-        echo -e "  ${BOLD}${C_GREEN}├────────────────────────────────────────────────────────────────────────┤${RST}"
-        printf "  ${C_GREEN}│${RST}  Live Engine Role     : %-60b ${C_GREEN}│${RST}\n" "$role_tag"
-        printf "  ${C_GREEN}│${RST}  Server Leaf Domain   : %-46s ${C_GREEN}│${RST}\n" "${leaf_subj:0:46}"
-        printf "  ${C_GREEN}│${RST}  Issuer CA Authority  : %-46s ${C_GREEN}│${RST}\n" "${leaf_iss:0:46}"
-        printf "  ${C_GREEN}│${RST}  SAN Domains Included : %-46s ${C_GREEN}│${RST}\n" "${leaf_san:0:46}"
-        printf "  ${C_GREEN}│${RST}  Chain Level(s)       : %-46s ${C_GREEN}│${RST}\n" "$chain_count [Leaf + Intermediate CA]"
-        echo -e "  ${BOLD}${C_GREEN}├────────────────────────────────────────────────────────────────────────┤${RST}"
-        echo -e "  ${BOLD}${C_GREEN}│  FILE PATHS FOR INBOUND (Option A: File Path in Inbound Settings):     │${RST}"
-        printf "  ${C_GREEN}│${RST}   • Cert file path     : %-44s ${C_GREEN}│${RST}\n" "$cf"
-        printf "  ${C_GREEN}│${RST}   • Key file path      : %-44s ${C_GREEN}│${RST}\n" "$kf"
-        echo -e "  ${BOLD}${C_GREEN}╰────────────────────────────────────────────────────────────────────────╯${RST}\n"
+        echo -e "  ${BOLD}${C_GREEN}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
+        echo -e "  ${BOLD}${C_GREEN}┃ [VAULT PROFILE $c_idx] $cf${RST}"
+        echo -e "  ${BOLD}${C_GREEN}┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
+        echo -e "  ${C_GREEN}┃${RST} ${BOLD}Live Role${RST}     : $role_tag"
+        echo -e "  ${C_GREEN}┃${RST} ${BOLD}Subject CN${RST}    : ${C_WHITE}${leaf_subj}${RST}"
+        echo -e "  ${C_GREEN}┃${RST} ${BOLD}Issuer CA${RST}     : ${C_GRAY}${leaf_iss}${RST}"
+        echo -e "  ${C_GREEN}┃${RST} ${BOLD}SAN Domains${RST}   : ${C_CYAN}${leaf_san}${RST}"
+        echo -e "  ${C_GREEN}┃${RST} ${BOLD}Chain Levels${RST}  : ${chain_count} [Leaf + Intermediate CA]"
+        echo -e "  ${BOLD}${C_GREEN}┣━ Option A: File Paths for Inbound ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
+        echo -e "  ${C_GREEN}┃${RST}  • Cert path : ${C_CYAN}${cf}${RST}"
+        echo -e "  ${C_GREEN}┃${RST}  • Key path  : ${C_CYAN}${kf}${RST}"
+        echo -e "  ${BOLD}${C_GREEN}┣━ Option B: 1. CERTIFICATE CONTENT BOX (Copy into Panel) ━━━━━━━━━━━━━━━${RST}"
+        echo -e "  ${BOLD}${C_GREEN}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
+        eval "$ssh_c 'cat \"$cf\"'"
+        echo ""
+
+        echo -e "  ${BOLD}${C_RED}┏━ Option B: 2. KEY CONTENT BOX (Copy into Panel) ━━━━━━━━━━━━━━━━━━━━━━━${RST}"
+        echo -e "  ${BOLD}${C_RED}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
+        eval "$ssh_c 'cat \"$kf\"'"
+        echo -e "\n  ${C_GRAY}────────────────────────────────────────────────────────────────────────${RST}\n"
     done
 
-    echo -e "    ${C_CYAN}[1-${#cert_files[@]}]${RST} 📋 Reveal Full Inbound Content (Certificate Content & Key Content Boxes)"
-    echo -e "    ${C_PURPLE}[S]${RST}   ⚡ Switch Master Panel Orchestration SSL to a Specific Profile"
-    echo -e "    ${C_GRAY}[0]${RST}   🔙 Back to Node Dashboard"
+    echo -e "  ${BOLD}${C_CYAN}⚡ QUICK CONTROLS:${RST}"
+    echo -e "    ${C_PURPLE}[S]${RST} ⚡ Switch Master Panel Orchestration SSL to a Specific Profile"
+    echo -e "    ${C_GRAY}[0]${RST} 🔙 Back to Node Dashboard"
     read -rp "$(echo -e "\n  ${C_PURPLE}▶ Choice: ${RST}")" V_ACT < /dev/tty
 
-    if [[ "$V_ACT" =~ ^[0-9]+$ ]] && [ "$V_ACT" -ge 1 ] && [ "$V_ACT" -le "${#cert_files[@]}" ]; then
-        local chosen_cf="${cert_files[$((V_ACT - 1))]}"
-        local chosen_kf="${chosen_cf%/*}/privkey.pem"
-        [[ "$chosen_cf" == *"self_cert.pem"* ]] && chosen_kf="${chosen_cf%/*}/self_key.pem"
-
-        ui_sub_banner
-        echo -e "  ${BOLD}${C_CYAN}📋 INBOUND COPY BOXES FOR PROFILE $V_ACT: $chosen_cf${RST}\n"
-        
-        echo -e "  ${BOLD}${C_GREEN}══════════════════════════════════════════════════════════════════════════${RST}"
-        echo -e "  ${BOLD}${C_GREEN}1. CERTIFICATE CONTENT BOX (Copy entirely into 'Certificate content'):   ${RST}"
-        echo -e "  ${BOLD}${C_GREEN}══════════════════════════════════════════════════════════════════════════${RST}"
-        eval "$ssh_c 'cat \"$chosen_cf\"'"
-        echo ""
-
-        echo -e "  ${BOLD}${C_RED}══════════════════════════════════════════════════════════════════════════${RST}"
-        echo -e "  ${BOLD}${C_RED}2. KEY CONTENT BOX (Copy entirely into 'Key content'):                   ${RST}"
-        echo -e "  ${BOLD}${C_RED}══════════════════════════════════════════════════════════════════════════${RST}"
-        eval "$ssh_c 'cat \"$chosen_kf\"'"
-        echo ""
-
-        read -rp "  Press [ENTER] to return to vault..." < /dev/tty
-    elif [[ "$V_ACT" =~ ^[sS]$ ]]; then
+    if [[ "$V_ACT" =~ ^[sS]$ ]]; then
         read -rp "  ▶ Select Profile number to bind to Master Panel [1-${#cert_files[@]}]: " S_NUM < /dev/tty
         if [[ "$S_NUM" =~ ^[0-9]+$ ]] && [ "$S_NUM" -ge 1 ] && [ "$S_NUM" -le "${#cert_files[@]}" ]; then
             local sw_cf="${cert_files[$((S_NUM - 1))]}"
@@ -251,8 +237,8 @@ inspect_node_ssl_details() {
             echo -e "\n  ${C_BLUE}ℹ Binding $sw_cf to /var/lib/pg-node/certs/ssl_cert.pem...${RST}"
             eval "$ssh_c 'cp -f \"$sw_cf\" /var/lib/pg-node/certs/ssl_cert.pem && cp -f \"$sw_kf\" /var/lib/pg-node/certs/ssl_key.pem && docker restart node 2>/dev/null || true; systemctl restart pg-node-service 2>/dev/null || true'"
             log OK "Master Panel SSL linked to $sw_cf"
+            read -rp "  Press [ENTER] to continue..." < /dev/tty
         fi
-        read -rp "  Press [ENTER] to continue..." < /dev/tty
     fi
 }
 
@@ -333,7 +319,7 @@ manage_node_dns_center() {
                                  --data "{\"type\":\"$new_rtype\",\"name\":\"$fqdn\",\"content\":\"$NEW_R_IP\",\"ttl\":1,\"proxied\":false,\"comment\":\"$full_comment\"}" >/dev/null
                             local updated_entry="$fqdn ($NEW_R_IP)"
                             local tmp_u; tmp_u=$(mktemp)
-                            jq --arg n "$n_idx" --arg o "$chosen_entry" --arg u "$updated_entry" \
+                            jq --arg n "$idx_pos" --arg o "$chosen_entry" --arg u "$updated_entry" \
                                '.[($n|tonumber)].dns_records = [.[($n|tonumber)].dns_records[] | if . == $o then $u else . end]' "$NODES_FILE" > "$tmp_u" && mv "$tmp_u" "$NODES_FILE"
                             log OK "Updated DNS record to $NEW_R_IP"
                         fi
@@ -1129,7 +1115,7 @@ view_logs() {
     read -rp "  Press [ENTER] to return..." < /dev/tty
 }
 
-# بارگذاری دیتابیس‌ها و ابزارهای مورد نیاز
+# بارگذاری اولیه
 init_db
 sudo apt-get install -qq -y jq sshpass curl tar certbot python3 >/dev/null 2>&1
 
