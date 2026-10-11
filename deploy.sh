@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# PasarGuard Multi-Node Auto-Deployer (v8.5 - Universal Multi-SSL Sync Edition)
+# PasarGuard Multi-Node Auto-Deployer (v8.6 - System Provisioning & Hostname Edition)
 # Developed by Saeed SK (@saeedsk32)
 # ==============================================================================
 
@@ -32,7 +32,7 @@ ui_banner() {
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██████╔╝██║  ███╗${RST}${BOLD}${C_PURPLE}██║  ██║█████╗  ██████╔╝██║     ██║   ██║ ╚████╔╝ ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██╔═══╝ ██║   ██║${RST}${BOLD}${C_PURPLE}██║  ██║██╔══╝  ██╔═══╝ ██║     ██║   ██║  ╚██╔╝  ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██║     ╚██████╔╝${RST}${BOLD}${C_PURPLE}██████╔╝███████╗██║     ███████╗╚██████╔╝   ██║   ${RST}   ${C_CYAN}│${RST}"
-    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v8.5 (Production)${RST}           ${C_CYAN}│${RST}"
+    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v8.6 (Production)${RST}           ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
 }
 
@@ -273,6 +273,18 @@ deploy_new_node() {
     fi
     log OK "SSH connection established."
 
+    # تنظیم نام هاست لینوکسی سرور ریموت
+    log INFO "Configuring remote server hostname to $NODE_HOST..."
+    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" \
+        "hostnamectl set-hostname '$NODE_HOST' 2>/dev/null || hostname '$NODE_HOST'; sed -i '/127.0.1.1/d' /etc/hosts 2>/dev/null || true; echo '127.0.1.1 $NODE_HOST' >> /etc/hosts"
+    log OK "Remote hostname set to $NODE_HOST"
+
+    # آپدیت کامل مخازن و پکیج‌های سیستم‌عامل نود به صورت noninteractive
+    log INFO "Running apt-get update & upgrade on remote server (this may take a moment)..."
+    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" \
+        "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' >/dev/null 2>&1"
+    log OK "Remote system packages updated successfully."
+
     log INFO "Tuning kernel TCP BBR and baseline firewall..."
     sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" \
         "modprobe tcp_bbr 2>/dev/null || true; echo 'net.core.default_qdisc=fq' > /etc/sysctl.d/99-bbr.conf; echo 'net.ipv4.tcp_congestion_control=bbr' >> /etc/sysctl.d/99-bbr.conf; sysctl --system >/dev/null 2>&1; ufw allow $NODE_PORT/tcp; ufw allow $API_PORT/tcp; ufw allow 22/tcp; ufw --force enable >/dev/null 2>&1 || true"
@@ -446,9 +458,6 @@ add_existing_active_node() {
     read -rp "  ▶ Master FQDN Address [e.g. $E_HOST.$bdom]: " E_ADDR < /dev/tty
     E_ADDR=${E_ADDR:-"$E_HOST.$bdom"}
 
-    # =========================================================================
-    # MULTI-SSL SYNC SELECTION FOR EXISTING NODE
-    # =========================================================================
     echo -e "\n  ${BOLD}${C_CYAN}🔐 MULTI-SSL INBOUND VAULT SYNC FOR THIS NODE:${RST}"
     echo -e "  ${C_GRAY}Select which certificates you want to push to /var/lib/pg-node/certs/ on this node:${RST}"
     local all_domains=()
@@ -654,6 +663,117 @@ inspect_node_ssl_details() {
             read -rp "  Press [ENTER] to continue..." < /dev/tty
         fi
     fi
+}
+
+manage_node_dns_center() {
+    local n_idx="$1"
+    local t_host t_bdom
+    t_host=$(jq -r ".[$n_idx].hostname" "$NODES_FILE")
+    t_bdom=$(jq -r ".[$n_idx].base_domain" "$NODES_FILE")
+    local c_tok c_zid
+    c_tok=$(jq -r --arg bd "$t_bdom" '.[] | select(.domain == $bd) | .token' "$DOMAINS_FILE")
+    c_zid=$(jq -r --arg bd "$t_bdom" '.[] | select(.domain == $bd) | .zone_id' "$DOMAINS_FILE")
+
+    while true; do
+        ui_sub_banner
+        echo -e "  ${BOLD}${C_CYAN}🌐 CLOUDFLARE DNS MANAGEMENT FOR NODE: $t_host ($t_bdom)${RST}\n"
+        local recs=()
+        while IFS= read -r r; do [ -n "$r" ] && recs+=("$r"); done < <(jq -r ".[$n_idx].dns_records[]? // empty" "$NODES_FILE")
+
+        if [ ${#recs[@]} -eq 0 ]; then
+            echo -e "  ${C_YELLOW}No DNS records currently registered for this node.${RST}\n"
+        else
+            echo -e "  ${C_PURPLE}Active DNS Records in Inventory:${RST}"
+            for i in "${!recs[@]}"; do
+                echo -e "    ${C_CYAN}[$((i + 1))]${RST} ${recs[$i]}"
+            done
+            echo ""
+        fi
+
+        echo -e "    ${C_GREEN}[1]${RST} ➕ Add New Subdomain Record (Single IP or Multi-IP Pool)"
+        echo -e "    ${C_YELLOW}[2]${RST} ✏️  Edit Target IP / Tag of an Existing Record"
+        echo -e "    ${C_RED}[3]${RST} 🗑️  Delete a Record from Cloudflare & Local Inventory"
+        echo -e "    ${C_GRAY}[0]${RST} 🔙 Back to Node Dashboard"
+        read -rp "$(echo -e "\n  ${C_PURPLE}▶ Choose DNS Action [0-3]: ${RST}")" DNS_ACT < /dev/tty
+
+        case "$DNS_ACT" in
+            1)
+                read -rp "  ▶ Subdomain prefix (ex: pool1-1 or cdn): " NEW_SUB < /dev/tty
+                read -rp "  ▶ Target IP(s) (comma-separated for Round-Robin): " NEW_IPS < /dev/tty
+                read -rp "  ▶ Cloudflare Comment Tag [RoundRobin]: " NEW_TAG < /dev/tty
+                NEW_TAG=${NEW_TAG:-RoundRobin}
+                if [ -n "$NEW_SUB" ] && [ -n "$NEW_IPS" ]; then
+                    local target_fqdn="${NEW_SUB}.${t_bdom}"
+                    IFS=',' read -ra IPS_TO_ADD <<< "$NEW_IPS"
+                    for raw_i in "${IPS_TO_ADD[@]}"; do
+                        local cl_ip; cl_ip=$(echo "$raw_i" | tr -d ' ')
+                        if [ -n "$cl_ip" ]; then
+                            upsert_cloudflare_dns "$c_zid" "$c_tok" "$target_fqdn" "$cl_ip" "PG-Node: $t_host | $NEW_TAG"
+                            local entry_str="$target_fqdn ($cl_ip)"
+                            local tmp_f; tmp_f=$(mktemp)
+                            jq --arg n "$idx_pos" --arg e "$entry_str" '.[($n|tonumber)].dns_records += [$e]' "$NODES_FILE" > "$tmp_f" && mv "$tmp_f" "$NODES_FILE"
+                            log OK "Added DNS Record $entry_str"
+                        fi
+                    done
+                fi
+                read -rp "  Press [ENTER] to continue..." < /dev/tty
+                ;;
+            2)
+                if [ ${#recs[@]} -gt 0 ]; then
+                    read -rp "  ▶ Select record number to edit [1-${#recs[@]}]: " R_EDIT < /dev/tty
+                    if [[ "$R_EDIT" =~ ^[0-9]+$ ]] && [ "$R_EDIT" -ge 1 ] && [ "$R_EDIT" -le "${#recs[@]}" ]; then
+                        local chosen_entry="${recs[$((R_EDIT - 1))]}"
+                        local fqdn curr_ip
+                        fqdn=$(echo "$chosen_entry" | awk '{print $1}')
+                        curr_ip=$(echo "$chosen_entry" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+')
+                        read -rp "  ▶ New IP Address [$curr_ip]: " NEW_R_IP < /dev/tty
+                        NEW_R_IP=${NEW_R_IP:-"$curr_ip"}
+                        read -rp "  ▶ New Comment tag: " NEW_R_TAG < /dev/tty
+                        NEW_R_TAG=${NEW_R_TAG:-"Custom"}
+                        local full_comment="PG-Node: $t_host | $NEW_R_TAG"
+                        local rec_id
+                        local rtype="A"; [[ "$curr_ip" == *:* ]] && rtype="AAAA"
+                        rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?name=$fqdn&type=$rtype&content=$curr_ip" \
+                             -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty' 2>/dev/null)
+                        if [ -n "$rec_id" ]; then
+                            local new_rtype="A"; [[ "$NEW_R_IP" == *:* ]] && new_rtype="AAAA"
+                            curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records/$rec_id" \
+                                 -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" \
+                                 --data "{\"type\":\"$new_rtype\",\"name\":\"$fqdn\",\"content\":\"$NEW_R_IP\",\"ttl\":1,\"proxied\":false,\"comment\":\"$full_comment\"}" >/dev/null
+                            local updated_entry="$fqdn ($NEW_R_IP)"
+                            local tmp_u; tmp_u=$(mktemp)
+                            jq --arg n "$idx_pos" --arg o "$chosen_entry" --arg u "$updated_entry" \
+                               '.[($n|tonumber)].dns_records = [.[($n|tonumber)].dns_records[] | if . == $o then $u else . end]' "$NODES_FILE" > "$tmp_u" && mv "$tmp_u" "$NODES_FILE"
+                            log OK "Updated DNS record to $NEW_R_IP"
+                        fi
+                    fi
+                fi
+                read -rp "  Press [ENTER] to continue..." < /dev/tty
+                ;;
+            3)
+                if [ ${#recs[@]} -gt 0 ]; then
+                    read -rp "  ▶ Select record number to delete [1-${#recs[@]}]: " R_DEL < /dev/tty
+                    if [[ "$R_DEL" =~ ^[0-9]+$ ]] && [ "$R_DEL" -ge 1 ] && [ "$R_DEL" -le "${#recs[@]}" ]; then
+                        local del_entry="${recs[$((R_DEL - 1))]}"
+                        local del_fqdn del_ip
+                        del_fqdn=$(echo "$del_entry" | awk '{print $1}')
+                        del_ip=$(echo "$del_entry" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+')
+                        local rtype="A"; [[ "$del_ip" == *:* ]] && rtype="AAAA"
+                        local rec_id
+                        rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records?name=$del_fqdn&type=$rtype&content=$del_ip" \
+                             -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty' 2>/dev/null)
+                        [ -n "$rec_id" ] && curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records/$rec_id" -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" >/dev/null
+                        local tmp_del; tmp_del=$(mktemp)
+                        jq --arg n "$idx_pos" --arg o "$del_entry" '.[($n|tonumber)].dns_records = [.[($n|tonumber)].dns_records[] | select(. != $o)]' "$NODES_FILE" > "$tmp_del" && mv "$tmp_del" "$NODES_FILE"
+                        log OK "Record $del_fqdn ($del_ip) deleted."
+                    fi
+                fi
+                read -rp "  Press [ENTER] to continue..." < /dev/tty
+                ;;
+            0) break ;;
+            *) ;;
+        esac
+    done
 }
 
 manage_saved_nodes() {
