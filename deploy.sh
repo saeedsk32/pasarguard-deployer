@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# PasarGuard Multi-Node Auto-Deployer (v8.6 - System Provisioning & Hostname Edition)
+# PasarGuard Multi-Node Auto-Deployer (v8.7 - Auto Xray-Core & Hostname Edition)
 # Developed by Saeed SK (@saeedsk32)
 # ==============================================================================
 
@@ -32,7 +32,7 @@ ui_banner() {
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██████╔╝██║  ███╗${RST}${BOLD}${C_PURPLE}██║  ██║█████╗  ██████╔╝██║     ██║   ██║ ╚████╔╝ ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██╔═══╝ ██║   ██║${RST}${BOLD}${C_PURPLE}██║  ██║██╔══╝  ██╔═══╝ ██║     ██║   ██║  ╚██╔╝  ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██║     ╚██████╔╝${RST}${BOLD}${C_PURPLE}██████╔╝███████╗██║     ███████╗╚██████╔╝   ██║   ${RST}   ${C_CYAN}│${RST}"
-    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v8.6 (Production)${RST}           ${C_CYAN}│${RST}"
+    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v8.7 (Production)${RST}           ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
 }
 
@@ -280,7 +280,7 @@ deploy_new_node() {
     log OK "Remote hostname set to $NODE_HOST"
 
     # آپدیت کامل مخازن و پکیج‌های سیستم‌عامل نود به صورت noninteractive
-    log INFO "Running apt-get update & upgrade on remote server (this may take a moment)..."
+    log INFO "Running apt-get update & upgrade on remote server..."
     sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" \
         "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' >/dev/null 2>&1"
     log OK "Remote system packages updated successfully."
@@ -355,6 +355,12 @@ deploy_new_node() {
     token_extracted=$(sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" \
         "grep -oE '[0-9a-fA-F-]{36}' /opt/pg-node/.env 2>/dev/null || grep -oE '[0-9a-fA-F-]{36}' /etc/systemd/system/pg-node.service 2>/dev/null || echo '$generated_api_key'" | head -n 1)
     token_extracted=${token_extracted:-$generated_api_key}
+
+    # نصب و دانلود خودکار آخرین هسته Xray-Core روی نود جدید
+    log INFO "Installing and activating latest Xray-core on remote node..."
+    sshpass -p "$NODE_SSH_PASS" ssh -p "$NODE_SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$NODE_SSH_USER@$NODE_IP" \
+        "export PATH=/usr/local/bin:\$PATH; pg-node core-update --version latest -y 2>/dev/null || true"
+    log OK "Latest Xray-core installed and configured."
 
     log INFO "Pre-seeding selected Wildcard SSL certificates to Multi-SSL Vault..."
     for s_dom in "${DOMAINS_TO_SEED[@]}"; do
@@ -840,6 +846,9 @@ manage_saved_nodes() {
                 panel_status="${C_YELLOW}○ Standby / Checking${RST}"
             fi
 
+            local xray_version
+            xray_version=$(sshpass -p "$target_pass" ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=2 "$target_user@$target_ip" "pg-node 2>/dev/null | grep -A1 'Current Xray-core version:' | tail -n1 | tr -d ' \r'" 2>/dev/null || echo "Not detected")
+
             local _remote_cert _leaf_cert
             _remote_cert=$(sshpass -p "$target_pass" ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=2 "$target_user@$target_ip" "cat /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || cat /var/lib/pg-node/certs/${target_bdom}/fullchain.pem 2>/dev/null" 2>/dev/null || true)
             if [ -n "$_remote_cert" ]; then
@@ -858,6 +867,7 @@ manage_saved_nodes() {
             printf "  ${C_GREEN}│${RST}  Connection Type      : %-46s ${C_GREEN}│${RST}\n" "${target_proto^^}"
             printf "  ${C_GREEN}│${RST}  Panel Service Link   : %-55b ${C_GREEN}│${RST}\n" "$panel_status"
             printf "  ${C_GREEN}│${RST}  TCP BBR Engine       : %-55b ${C_GREEN}│${RST}\n" "$bbr_status"
+            printf "  ${C_GREEN}│${RST}  Active Xray-Core     : %-46s ${C_GREEN}│${RST}\n" "${xray_version:-Unknown}"
             printf "  ${C_GREEN}│${RST}  API Key Secret       : %-46s ${C_GREEN}│${RST}\n" "${target_token:-Not detected}"
             echo -e "  ${C_GREEN}├────────────────────────────────────────────────────────────────────────┤${RST}"
             echo -e "  ${C_GREEN}│  Cloudflare DNS Records:                                               │${RST}"
@@ -883,8 +893,8 @@ manage_saved_nodes() {
             echo -e "    ${C_GREEN}[7]${RST}  📜 Follow Live Node Logs (Ctrl+C to exit)"
             echo -e "    ${C_GREEN}[8]${RST}  ⚡ Switch Protocol (gRPC <-> REST)"
             echo -e "    ${C_GREEN}[9]${RST}  🛡️  Regenerate Node Self-Signed SSL (SAN Enabled)"
-            echo -e "    ${C_GREEN}[10]${RST} ⚙️  Manage Systemd Service"
-            echo -e "    ${C_GREEN}[11]${RST} 📦 Update / Change Xray-core"
+            echo -e "    ${C_GREEN}[10]${RST} ⚙️  Restart & Check Systemd Service"
+            echo -e "    ${C_GREEN}[11]${RST} 📦 Update / Change Xray-core (pg-node core-update)"
             echo -e "    ${C_GREEN}[12]${RST} 🔄 Update PasarGuard Node Software"
             echo -e "    ${C_GREEN}[13]${RST} 🗺️  Update GeoFiles (GeoIP & GeoSite)"
             echo -e "    ${C_GREEN}[14]${RST} 🔑 Set / Regenerate Node API Key"
@@ -979,10 +989,30 @@ manage_saved_nodes() {
                     read -rp "  Press [ENTER] to continue..." < /dev/tty
                     ;;
                 10)
-                    eval "$ssh_cmd -t 'export PATH=/usr/local/bin:\$PATH; pg-node service'"
+                    eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node service-restart; pg-node service-status'"
+                    read -rp "  Press [ENTER] to continue..." < /dev/tty
                     ;;
                 11)
-                    eval "$ssh_cmd -t 'export PATH=/usr/local/bin:\$PATH; pg-node xray'"
+                    echo -e "\n  ${C_BLUE}ℹ Opening Xray Core Update Manager on $target_host...${RST}"
+                    echo -e "    ${C_GREEN}[1]${RST} 🚀 Auto-Update to Latest Xray-core"
+                    echo -e "    ${C_PURPLE}[2]${RST} ✏️  Specify Custom Version"
+                    echo -e "    ${C_GRAY}[0]${RST} 🔙 Back"
+                    read -rp "$(echo -e "\n  ${C_PURPLE}▶ Select Option [0-2]: ${RST}")" XRAY_OPT < /dev/tty
+                    case "$XRAY_OPT" in
+                        1)
+                            eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node core-update --version latest -y'"
+                            log OK "Xray-core updated to latest version."
+                            ;;
+                        2)
+                            read -rp "  ▶ Enter Xray version (e.g. 26.3.27): " C_VER < /dev/tty
+                            if [ -n "$C_VER" ]; then
+                                eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node core-update --version $C_VER -y'"
+                                log OK "Xray-core updated to $C_VER."
+                            fi
+                            ;;
+                        *) ;;
+                    esac
+                    read -rp "  Press [ENTER] to continue..." < /dev/tty
                     ;;
                 12)
                     eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node update -y 2>/dev/null || true'"
@@ -990,7 +1020,7 @@ manage_saved_nodes() {
                     read -rp "  Press [ENTER] to continue..." < /dev/tty
                     ;;
                 13)
-                    eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node geo -y 2>/dev/null || true'"
+                    eval "$ssh_cmd 'export PATH=/usr/local/bin:\$PATH; pg-node geofiles -y 2>/dev/null || true'"
                     log OK "GeoFiles updated on remote node."
                     read -rp "  Press [ENTER] to continue..." < /dev/tty
                     ;;
