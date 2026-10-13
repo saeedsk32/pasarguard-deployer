@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# PasarGuard Multi-Node Auto-Deployer (v8.8 - Interactive TTY & Xray Core Fix)
+# PasarGuard Multi-Node Auto-Deployer (v8.9 - Fixed DNS Purge & Deletion Engine)
 # Developed by Saeed SK (@saeedsk32)
 # ==============================================================================
 
@@ -32,7 +32,7 @@ ui_banner() {
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██████╔╝██║  ███╗${RST}${BOLD}${C_PURPLE}██║  ██║█████╗  ██████╔╝██║     ██║   ██║ ╚████╔╝ ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██╔═══╝ ██║   ██║${RST}${BOLD}${C_PURPLE}██║  ██║██╔══╝  ██╔═══╝ ██║     ██║   ██║  ╚██╔╝  ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██║     ╚██████╔╝${RST}${BOLD}${C_PURPLE}██████╔╝███████╗██║     ███████╗╚██████╔╝   ██║   ${RST}   ${C_CYAN}│${RST}"
-    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v8.8 (Production)${RST}           ${C_CYAN}│${RST}"
+    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v8.9 (Production)${RST}           ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
 }
 
@@ -108,6 +108,29 @@ upsert_cloudflare_dns() {
              -H "Authorization: Bearer $tok" -H "Content-Type: application/json" \
              --data "{\"type\":\"$type\",\"name\":\"$name\",\"content\":\"$ip\",\"ttl\":1,\"proxied\":false,\"comment\":\"$comment\"}" >/dev/null
         log OK "Created DNS Record: $name -> $ip [$comment]"
+    fi
+}
+
+delete_cloudflare_dns_record() {
+    local zid="$1" tok="$2" name="$3" ip="$4"
+    local type="A"
+    [[ "$ip" == *:* ]] && type="AAAA"
+
+    local rec_id
+    rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zid/dns_records?name=$name&type=$type&content=$ip" \
+         -H "Authorization: Bearer $tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty' 2>/dev/null)
+
+    if [ -n "$rec_id" ]; then
+        local del_res
+        del_res=$(curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$zid/dns_records/$rec_id" \
+             -H "Authorization: Bearer $tok" -H "Content-Type: application/json" | jq -r '.success // false' 2>/dev/null)
+        if [ "$del_res" == "true" ]; then
+            log OK "Deleted Cloudflare Record: $name ($ip)"
+        else
+            log WARN "Failed to delete Cloudflare Record: $name ($ip)"
+        fi
+    else
+        log INFO "Record not found on Cloudflare (already clean): $name ($ip)"
     fi
 }
 
@@ -760,14 +783,10 @@ manage_node_dns_center() {
                         local del_fqdn del_ip
                         del_fqdn=$(echo "$del_entry" | awk '{print $1}')
                         del_ip=$(echo "$del_entry" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+')
-                        local rtype="A"; [[ "$del_ip" == *:* ]] && rtype="AAAA"
-                        local rec_id
-                        rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records?name=$del_fqdn&type=$rtype&content=$del_ip" \
-                             -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty' 2>/dev/null)
-                        [ -n "$rec_id" ] && curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records/$rec_id" -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" >/dev/null
+                        delete_cloudflare_dns_record "$c_zid" "$c_tok" "$del_fqdn" "$del_ip"
                         local tmp_del; tmp_del=$(mktemp)
                         jq --arg n "$idx_pos" --arg o "$del_entry" '.[($n|tonumber)].dns_records = [.[($n|tonumber)].dns_records[] | select(. != $o)]' "$NODES_FILE" > "$tmp_del" && mv "$tmp_del" "$NODES_FILE"
-                        log OK "Record $del_fqdn ($del_ip) deleted."
+                        log OK "Record $del_fqdn removed from local inventory."
                     fi
                 fi
                 read -rp "  Press [ENTER] to continue..." < /dev/tty
@@ -1056,26 +1075,31 @@ manage_saved_nodes() {
                 17)
                     read -rp "  Type 'yes' to completely uninstall node and clean DNS: " PURGE_C < /dev/tty
                     if [ "$PURGE_C" == "yes" ]; then
+                        echo -e "\n  ${C_BLUE}ℹ Removing remote node daemon and software...${RST}"
                         sshpass -p "$target_pass" ssh -t -p "$target_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$target_user@$target_ip" \
                             "export PATH=/usr/local/bin:\$PATH; echo -e 'y\ny' | pg-node uninstall 2>/dev/null || true; docker rm -f node 2>/dev/null || true; systemctl stop pg-node pg-node-service 2>/dev/null || true; rm -rf /opt/pg-node /var/lib/pg-node /usr/local/bin/pg-node /usr/bin/pg-node /etc/systemd/system/pg-node*.service; systemctl daemon-reload 2>/dev/null || true; ufw delete allow $target_sport/tcp 2>/dev/null || true"
+                        
+                        echo -e "  ${C_BLUE}ℹ Cleaning up Cloudflare DNS records for $target_host...${RST}"
                         local c_tok c_zid
                         c_tok=$(jq -r --arg bd "$target_bdom" '.[] | select(.domain == $bd) | .token' "$DOMAINS_FILE")
                         c_zid=$(jq -r --arg bd "$target_bdom" '.[] | select(.domain == $bd) | .zone_id' "$DOMAINS_FILE")
+                        
                         if [ -n "$c_tok" ] && [ -n "$c_zid" ]; then
-                            jq -r ".[$idx_pos].dns_records[]? // empty" "$NODES_FILE" | while read -r r_to_del; do
-                                local clean_name clean_dip rtype="A"
-                                clean_name=$(echo "$r_to_del" | awk '{print $1}')
-                                clean_dip=$(echo "$r_to_del" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+')
-                                [[ "$clean_dip" == *:* ]] && rtype="AAAA"
-                                local rec_id
-                                rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records?name=$clean_name&type=$rtype&content=$clean_dip" \
-                                     -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty' 2>/dev/null)
-                                [ -n "$rec_id" ] && curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$cf_zid/dns_records/$rec_id" -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" >/dev/null
-                            done
+                            while IFS= read -r r_to_del; do
+                                if [ -n "$r_to_del" ]; then
+                                    local clean_name clean_dip
+                                    clean_name=$(echo "$r_to_del" | awk '{print $1}')
+                                    clean_dip=$(echo "$r_to_del" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+')
+                                    if [ -n "$clean_name" ] && [ -n "$clean_dip" ]; then
+                                        delete_cloudflare_dns_record "$c_zid" "$c_tok" "$clean_name" "$clean_dip"
+                                    fi
+                                fi
+                            done < <(jq -r ".[$idx_pos].dns_records[]? // empty" "$NODES_FILE" 2>/dev/null)
                         fi
+
                         local tmp_del; tmp_del=$(mktemp)
                         jq "del(.[$idx_pos])" "$NODES_FILE" > "$tmp_del" && mv "$tmp_del" "$NODES_FILE"
-                        log OK "Node uninstalled and DNS cleaned."
+                        log OK "Node $target_host uninstalled, DNS cleaned, and removed from inventory."
                     fi
                     read -rp "  Press [ENTER] to continue..." < /dev/tty
                     break
