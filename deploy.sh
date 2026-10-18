@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# PasarGuard Multi-Node Auto-Deployer (v8.9 - Fixed DNS Purge & Deletion Engine)
+# PasarGuard Multi-Node Auto-Deployer (v9.0 - Verified DNS Purge & Clear Path Edition)
 # Developed by Saeed SK (@saeedsk32)
 # ==============================================================================
 
@@ -32,7 +32,7 @@ ui_banner() {
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██████╔╝██║  ███╗${RST}${BOLD}${C_PURPLE}██║  ██║█████╗  ██████╔╝██║     ██║   ██║ ╚████╔╝ ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██╔═══╝ ██║   ██║${RST}${BOLD}${C_PURPLE}██║  ██║██╔══╝  ██╔═══╝ ██║     ██║   ██║  ╚██╔╝  ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██║     ╚██████╔╝${RST}${BOLD}${C_PURPLE}██████╔╝███████╗██║     ███████╗╚██████╔╝   ██║   ${RST}   ${C_CYAN}│${RST}"
-    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v8.9 (Production)${RST}           ${C_CYAN}│${RST}"
+    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v9.0 (Production)${RST}           ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
 }
 
@@ -112,25 +112,31 @@ upsert_cloudflare_dns() {
 }
 
 delete_cloudflare_dns_record() {
-    local zid="$1" tok="$2" name="$3" ip="$4"
-    local type="A"
+    local zid="$1" tok="$2" full_entry="$3"
+    local name ip type="A"
+
+    name=$(echo "$full_entry" | awk '{print $1}' | tr -d ' ')
+    ip=$(echo "$full_entry" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+' | head -n1)
     [[ "$ip" == *:* ]] && type="AAAA"
 
-    local rec_id
-    rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zid/dns_records?name=$name&type=$type&content=$ip" \
-         -H "Authorization: Bearer $tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty' 2>/dev/null)
+    if [ -z "$name" ] || [ -z "$ip" ]; then
+        return
+    fi
 
-    if [ -n "$rec_id" ]; then
-        local del_res
-        del_res=$(curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$zid/dns_records/$rec_id" \
-             -H "Authorization: Bearer $tok" -H "Content-Type: application/json" | jq -r '.success // false' 2>/dev/null)
-        if [ "$del_res" == "true" ]; then
-            log OK "Deleted Cloudflare Record: $name ($ip)"
-        else
-            log WARN "Failed to delete Cloudflare Record: $name ($ip)"
-        fi
+    local rec_ids
+    rec_ids=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zid/dns_records?name=$name&type=$type&content=$ip" \
+         -H "Authorization: Bearer $tok" -H "Content-Type: application/json" | jq -r '.result[].id // empty' 2>/dev/null)
+
+    if [ -n "$rec_ids" ]; then
+        while IFS= read -r rid; do
+            if [ -n "$rid" ]; then
+                curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$zid/dns_records/$rid" \
+                     -H "Authorization: Bearer $tok" -H "Content-Type: application/json" >/dev/null
+                log OK "Cloudflare record deleted: $name ($ip)"
+            fi
+        done <<< "$rec_ids"
     else
-        log INFO "Record not found on Cloudflare (already clean): $name ($ip)"
+        log INFO "Cloudflare record already removed: $name ($ip)"
     fi
 }
 
@@ -211,10 +217,11 @@ deploy_new_node() {
     NODE_SSH_PORT=${NODE_SSH_PORT:-22}
     read -rp "$(echo -e "  ${C_PURPLE}▶ SSH User [root]: ${RST}")" NODE_SSH_USER < /dev/tty
     NODE_SSH_USER=${NODE_SSH_USER:-root}
-    read -srp "$(echo -e "  ${C_PURPLE}▶ SSH Password: ${RST}")" NODE_SSH_PASS < /dev/tty
-    echo ""
+    
+    # آشکار کردن پرامپت رمز عبور به درخواست شما (بدون فلگ -s)
+    read -rp "$(echo -e "  ${C_PURPLE}▶ SSH Password (Visible): ${RST}")" NODE_SSH_PASS < /dev/tty
 
-    echo -e "  ${C_GRAY}ℹ Note: This subdomain is strictly used for Master Panel <-> Node orchestration.${RST}"
+    echo -e "\n  ${C_GRAY}ℹ Note: This subdomain is strictly used for Master Panel <-> Node orchestration.${RST}"
     echo -e "  ${C_GRAY}  It will point ONLY to your Primary IPv4 to avoid hostname mismatch.${RST}"
     read -rp "$(echo -e "  ${C_PURPLE}▶ Node Subdomain for Master Panel (e.g. de1 -> de1.${base_domain}): ${RST}")" SUB_PREFIX < /dev/tty
     SUB_PREFIX=${SUB_PREFIX:-$NODE_HOST}
@@ -445,7 +452,7 @@ add_existing_active_node() {
     E_PORT=${E_PORT:-22}
     read -rp "  ▶ Remote SSH User [root]: " E_USER < /dev/tty
     E_USER=${E_USER:-root}
-    read -srp "  ▶ Remote SSH Password: " E_PASS < /dev/tty
+    read -rp "  ▶ Remote SSH Password (Visible): " E_PASS < /dev/tty
     echo ""
 
     echo -e "\n  ${C_BLUE}ℹ Connecting to $E_IP:$E_PORT to auto-discover configuration...${RST}"
@@ -690,113 +697,6 @@ inspect_node_ssl_details() {
     fi
 }
 
-manage_node_dns_center() {
-    local n_idx="$1"
-    local t_host t_bdom
-    t_host=$(jq -r ".[$n_idx].hostname" "$NODES_FILE")
-    t_bdom=$(jq -r ".[$n_idx].base_domain" "$NODES_FILE")
-    local c_tok c_zid
-    c_tok=$(jq -r --arg bd "$t_bdom" '.[] | select(.domain == $bd) | .token' "$DOMAINS_FILE")
-    c_zid=$(jq -r --arg bd "$t_bdom" '.[] | select(.domain == $bd) | .zone_id' "$DOMAINS_FILE")
-
-    while true; do
-        ui_sub_banner
-        echo -e "  ${BOLD}${C_CYAN}🌐 CLOUDFLARE DNS MANAGEMENT FOR NODE: $t_host ($t_bdom)${RST}\n"
-        local recs=()
-        while IFS= read -r r; do [ -n "$r" ] && recs+=("$r"); done < <(jq -r ".[$n_idx].dns_records[]? // empty" "$NODES_FILE")
-
-        if [ ${#recs[@]} -eq 0 ]; then
-            echo -e "  ${C_YELLOW}No DNS records currently registered for this node.${RST}\n"
-        else
-            echo -e "  ${C_PURPLE}Active DNS Records in Inventory:${RST}"
-            for i in "${!recs[@]}"; do
-                echo -e "    ${C_CYAN}[$((i + 1))]${RST} ${recs[$i]}"
-            done
-            echo ""
-        fi
-
-        echo -e "    ${C_GREEN}[1]${RST} ➕ Add New Subdomain Record (Single IP or Multi-IP Pool)"
-        echo -e "    ${C_YELLOW}[2]${RST} ✏️  Edit Target IP / Tag of an Existing Record"
-        echo -e "    ${C_RED}[3]${RST} 🗑️  Delete a Record from Cloudflare & Local Inventory"
-        echo -e "    ${C_GRAY}[0]${RST} 🔙 Back to Node Dashboard"
-        read -rp "$(echo -e "\n  ${C_PURPLE}▶ Choose DNS Action [0-3]: ${RST}")" DNS_ACT < /dev/tty
-
-        case "$DNS_ACT" in
-            1)
-                read -rp "  ▶ Subdomain prefix (ex: pool1-1 or cdn): " NEW_SUB < /dev/tty
-                read -rp "  ▶ Target IP(s) (comma-separated for Round-Robin): " NEW_IPS < /dev/tty
-                read -rp "  ▶ Cloudflare Comment Tag [RoundRobin]: " NEW_TAG < /dev/tty
-                NEW_TAG=${NEW_TAG:-RoundRobin}
-                if [ -n "$NEW_SUB" ] && [ -n "$NEW_IPS" ]; then
-                    local target_fqdn="${NEW_SUB}.${t_bdom}"
-                    IFS=',' read -ra IPS_TO_ADD <<< "$NEW_IPS"
-                    for raw_i in "${IPS_TO_ADD[@]}"; do
-                        local cl_ip; cl_ip=$(echo "$raw_i" | tr -d ' ')
-                        if [ -n "$cl_ip" ]; then
-                            upsert_cloudflare_dns "$c_zid" "$c_tok" "$target_fqdn" "$cl_ip" "PG-Node: $t_host | $NEW_TAG"
-                            local entry_str="$target_fqdn ($cl_ip)"
-                            local tmp_f; tmp_f=$(mktemp)
-                            jq --arg n "$idx_pos" --arg e "$entry_str" '.[($n|tonumber)].dns_records += [$e]' "$NODES_FILE" > "$tmp_f" && mv "$tmp_f" "$NODES_FILE"
-                            log OK "Added DNS Record $entry_str"
-                        fi
-                    done
-                fi
-                read -rp "  Press [ENTER] to continue..." < /dev/tty
-                ;;
-            2)
-                if [ ${#recs[@]} -gt 0 ]; then
-                    read -rp "  ▶ Select record number to edit [1-${#recs[@]}]: " R_EDIT < /dev/tty
-                    if [[ "$R_EDIT" =~ ^[0-9]+$ ]] && [ "$R_EDIT" -ge 1 ] && [ "$R_EDIT" -le "${#recs[@]}" ]; then
-                        local chosen_entry="${recs[$((R_EDIT - 1))]}"
-                        local fqdn curr_ip
-                        fqdn=$(echo "$chosen_entry" | awk '{print $1}')
-                        curr_ip=$(echo "$chosen_entry" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+')
-                        read -rp "  ▶ New IP Address [$curr_ip]: " NEW_R_IP < /dev/tty
-                        NEW_R_IP=${NEW_R_IP:-"$curr_ip"}
-                        read -rp "  ▶ New Comment tag: " NEW_R_TAG < /dev/tty
-                        NEW_R_TAG=${NEW_R_TAG:-"Custom"}
-                        local full_comment="PG-Node: $t_host | $NEW_R_TAG"
-                        local rec_id
-                        local rtype="A"; [[ "$curr_ip" == *:* ]] && rtype="AAAA"
-                        rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?name=$fqdn&type=$rtype&content=$curr_ip" \
-                             -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty' 2>/dev/null)
-                        if [ -n "$rec_id" ]; then
-                            local new_rtype="A"; [[ "$NEW_R_IP" == *:* ]] && new_rtype="AAAA"
-                            curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records/$rec_id" \
-                                 -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" \
-                                 --data "{\"type\":\"$new_rtype\",\"name\":\"$fqdn\",\"content\":\"$NEW_R_IP\",\"ttl\":1,\"proxied\":false,\"comment\":\"$full_comment\"}" >/dev/null
-                            local updated_entry="$fqdn ($NEW_R_IP)"
-                            local tmp_u; tmp_u=$(mktemp)
-                            jq --arg n "$idx_pos" --arg o "$chosen_entry" --arg u "$updated_entry" \
-                               '.[($n|tonumber)].dns_records = [.[($n|tonumber)].dns_records[] | if . == $o then $u else . end]' "$NODES_FILE" > "$tmp_u" && mv "$tmp_u" "$NODES_FILE"
-                            log OK "Updated DNS record to $NEW_R_IP"
-                        fi
-                    fi
-                fi
-                read -rp "  Press [ENTER] to continue..." < /dev/tty
-                ;;
-            3)
-                if [ ${#recs[@]} -gt 0 ]; then
-                    read -rp "  ▶ Select record number to delete [1-${#recs[@]}]: " R_DEL < /dev/tty
-                    if [[ "$R_DEL" =~ ^[0-9]+$ ]] && [ "$R_DEL" -ge 1 ] && [ "$R_DEL" -le "${#recs[@]}" ]; then
-                        local del_entry="${recs[$((R_DEL - 1))]}"
-                        local del_fqdn del_ip
-                        del_fqdn=$(echo "$del_entry" | awk '{print $1}')
-                        del_ip=$(echo "$del_entry" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+')
-                        delete_cloudflare_dns_record "$c_zid" "$c_tok" "$del_fqdn" "$del_ip"
-                        local tmp_del; tmp_del=$(mktemp)
-                        jq --arg n "$idx_pos" --arg o "$del_entry" '.[($n|tonumber)].dns_records = [.[($n|tonumber)].dns_records[] | select(. != $o)]' "$NODES_FILE" > "$tmp_del" && mv "$tmp_del" "$NODES_FILE"
-                        log OK "Record $del_fqdn removed from local inventory."
-                    fi
-                fi
-                read -rp "  Press [ENTER] to continue..." < /dev/tty
-                ;;
-            0) break ;;
-            *) ;;
-        esac
-    done
-}
-
 manage_saved_nodes() {
     while true; do
         ui_sub_banner
@@ -864,36 +764,49 @@ manage_saved_nodes() {
             local xray_version
             xray_version=$(sshpass -p "$target_pass" ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=2 "$target_user@$target_ip" "export PATH=/usr/local/bin:\$PATH; pg-node 2>/dev/null | grep -A1 'Current Xray-core version:' | tail -n1 | tr -d ' \r'" 2>/dev/null || echo "Not detected")
 
+            # شناسایی مسیرهای مستقیم فایل سرتیفیکیت و کلید فعال روی سرور
+            local live_cert_path="/var/lib/pg-node/certs/ssl_cert.pem"
+            local live_key_path="/var/lib/pg-node/certs/ssl_key.pem"
+            if [ -n "$target_bdom" ] && [ "$target_bdom" != "null" ]; then
+                local chk_dom_cert
+                chk_dom_cert=$(sshpass -p "$target_pass" ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=2 "$target_user@$target_ip" "[ -f /var/lib/pg-node/certs/${target_bdom}/fullchain.pem ] && echo YES || echo NO" 2>/dev/null)
+                if [ "$chk_dom_cert" == "YES" ]; then
+                    live_cert_path="/var/lib/pg-node/certs/${target_bdom}/fullchain.pem"
+                    live_key_path="/var/lib/pg-node/certs/${target_bdom}/privkey.pem"
+                fi
+            fi
+
             local _remote_cert _leaf_cert
-            _remote_cert=$(sshpass -p "$target_pass" ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=2 "$target_user@$target_ip" "cat /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || cat /var/lib/pg-node/certs/${target_bdom}/fullchain.pem 2>/dev/null" 2>/dev/null || true)
+            _remote_cert=$(sshpass -p "$target_pass" ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=2 "$target_user@$target_ip" "cat /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || cat $live_cert_path 2>/dev/null" 2>/dev/null || true)
             if [ -n "$_remote_cert" ]; then
                 _leaf_cert=$(echo "$_remote_cert" | openssl x509 2>/dev/null || echo "$_remote_cert")
             else
                 _leaf_cert="(Certificate not found on remote node)"
             fi
 
-            echo -e "  ${C_GREEN}╭────────────────────────────────────────────────────────────────────────╮${RST}"
-            echo -e "  ${C_GREEN}│         PASARGUARD PANEL CONNECTION DETAILS                            │${RST}"
-            echo -e "  ${C_GREEN}├────────────────────────────────────────────────────────────────────────┤${RST}"
-            printf "  ${C_GREEN}│${RST}  Node Name            : %-46s ${C_GREEN}│${RST}\n" "$target_host"
-            printf "  ${C_GREEN}│${RST}  Node Address         : %-46s ${C_GREEN}│${RST}\n" "$target_addr"
-            printf "  ${C_GREEN}│${RST}  Node Port            : %-46s ${C_GREEN}│${RST}\n" "$target_sport"
-            printf "  ${C_GREEN}│${RST}  API Port             : %-46s ${C_GREEN}│${RST}\n" "$target_aport"
-            printf "  ${C_GREEN}│${RST}  Connection Type      : %-46s ${C_GREEN}│${RST}\n" "${target_proto^^}"
-            printf "  ${C_GREEN}│${RST}  Panel Service Link   : %-55b ${C_GREEN}│${RST}\n" "$panel_status"
-            printf "  ${C_GREEN}│${RST}  TCP BBR Engine       : %-55b ${C_GREEN}│${RST}\n" "$bbr_status"
-            printf "  ${C_GREEN}│${RST}  Active Xray-Core     : %-46s ${C_GREEN}│${RST}\n" "${xray_version:-Unknown}"
-            printf "  ${C_GREEN}│${RST}  API Key Secret       : %-46s ${C_GREEN}│${RST}\n" "${target_token:-Not detected}"
-            echo -e "  ${C_GREEN}├────────────────────────────────────────────────────────────────────────┤${RST}"
-            echo -e "  ${C_GREEN}│  Cloudflare DNS Records:                                               │${RST}"
+            echo -e "  ${C_GREEN}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
+            echo -e "  ${C_GREEN}┃         PASARGUARD PANEL CONNECTION DETAILS                            ${RST}"
+            echo -e "  ${C_GREEN}┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
+            printf "  ${C_GREEN}┃${RST}  %-22s : %-44s\n" "Node Name" "$target_host"
+            printf "  ${C_GREEN}┃${RST}  %-22s : %-44s\n" "Node Address" "$target_addr"
+            printf "  ${C_GREEN}┃${RST}  %-22s : %-44s\n" "Node Port" "$target_sport"
+            printf "  ${C_GREEN}┃${RST}  %-22s : %-44s\n" "API Port" "$target_aport"
+            printf "  ${C_GREEN}┃${RST}  %-22s : %-44s\n" "Connection Type" "${target_proto^^}"
+            printf "  ${C_GREEN}┃${RST}  %-22s : %-44b\n" "Panel Service Link" "$panel_status"
+            printf "  ${C_GREEN}┃${RST}  %-22s : %-44b\n" "TCP BBR Engine" "$bbr_status"
+            printf "  ${C_GREEN}┃${RST}  %-22s : %-44s\n" "Active Xray-Core" "${xray_version:-Unknown}"
+            printf "  ${C_GREEN}┃${RST}  %-22s : %-44s\n" "API Key Secret" "${target_token:-Not detected}"
+            echo -e "  ${C_GREEN}┣━ Inbound Certificate Files on Disk (Option A: File Path) ━━━━━━━━━━━━━━${RST}"
+            printf "  ${C_GREEN}┃${RST}  • Cert file path       : %-44s\n" "$live_cert_path"
+            printf "  ${C_GREEN}┃${RST}  • Key file path        : %-44s\n" "$live_key_path"
+            echo -e "  ${C_GREEN}┣━ Cloudflare DNS Records ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
             while IFS= read -r drec; do
                 if [ -n "$drec" ]; then
-                    printf "  ${C_GREEN}│${RST}   • %-66s ${C_GREEN}│${RST}\n" "$drec"
+                    printf "  ${C_GREEN}┃${RST}   • %-60s\n" "$drec"
                 fi
             done < <(jq -r ".[$idx_pos].dns_records[]? // empty" "$NODES_FILE" 2>/dev/null)
-            echo -e "  ${C_GREEN}├────────────────────────────────────────────────────────────────────────┤${RST}"
-            echo -e "  ${C_GREEN}│  SSL Certificate (Leaf / <2048 chars for Panel):                       │${RST}"
-            echo -e "  ${C_GREEN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
+            echo -e "  ${C_GREEN}┣━ SSL Certificate Leaf Content (Option B: Paste into Panel) ━━━━━━━━━━━━${RST}"
+            echo -e "  ${C_GREEN}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
             echo -e "${C_YELLOW}$_leaf_cert${RST}\n"
 
             echo -e "  ${BOLD}${C_BLUE}⚡ INFRASTRUCTURE & DOMAIN ACTIONS:${RST}"
@@ -1087,12 +1000,7 @@ manage_saved_nodes() {
                         if [ -n "$c_tok" ] && [ -n "$c_zid" ]; then
                             while IFS= read -r r_to_del; do
                                 if [ -n "$r_to_del" ]; then
-                                    local clean_name clean_dip
-                                    clean_name=$(echo "$r_to_del" | awk '{print $1}')
-                                    clean_dip=$(echo "$r_to_del" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+')
-                                    if [ -n "$clean_name" ] && [ -n "$clean_dip" ]; then
-                                        delete_cloudflare_dns_record "$c_zid" "$c_tok" "$clean_name" "$clean_dip"
-                                    fi
+                                    delete_cloudflare_dns_record "$c_zid" "$c_tok" "$r_to_del"
                                 fi
                             done < <(jq -r ".[$idx_pos].dns_records[]? // empty" "$NODES_FILE" 2>/dev/null)
                         fi
