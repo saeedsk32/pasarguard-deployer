@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# PasarGuard Multi-Node Auto-Deployer (v9.0 - Verified DNS Purge & Clear Path Edition)
+# PasarGuard Multi-Node Auto-Deployer (v9.1 - Bulletproof Cloudflare Purge)
 # Developed by Saeed SK (@saeedsk32)
 # ==============================================================================
 
@@ -32,7 +32,7 @@ ui_banner() {
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██████╔╝██║  ███╗${RST}${BOLD}${C_PURPLE}██║  ██║█████╗  ██████╔╝██║     ██║   ██║ ╚████╔╝ ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██╔═══╝ ██║   ██║${RST}${BOLD}${C_PURPLE}██║  ██║██╔══╝  ██╔═══╝ ██║     ██║   ██║  ╚██╔╝  ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██║     ╚██████╔╝${RST}${BOLD}${C_PURPLE}██████╔╝███████╗██║     ███████╗╚██████╔╝   ██║   ${RST}   ${C_CYAN}│${RST}"
-    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v9.0 (Production)${RST}           ${C_CYAN}│${RST}"
+    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v9.1 (Production)${RST}           ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
 }
 
@@ -113,30 +113,51 @@ upsert_cloudflare_dns() {
 
 delete_cloudflare_dns_record() {
     local zid="$1" tok="$2" full_entry="$3"
-    local name ip type="A"
-
+    
+    # استخراج نام FQDN از ابتدای خط
+    local name
     name=$(echo "$full_entry" | awk '{print $1}' | tr -d ' ')
-    ip=$(echo "$full_entry" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+' | head -n1)
-    [[ "$ip" == *:* ]] && type="AAAA"
+    
+    # استخراج محتوای داخل پرانتز به عنوان آی‌پی هدف
+    local ip
+    ip=$(echo "$full_entry" | sed -n 's/.*(\(.*\)).*/\1/p' | tr -d ' ')
 
-    if [ -z "$name" ] || [ -z "$ip" ]; then
+    if [ -z "$name" ]; then
         return
     fi
 
-    local rec_ids
-    rec_ids=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zid/dns_records?name=$name&type=$type&content=$ip" \
-         -H "Authorization: Bearer $tok" -H "Content-Type: application/json" | jq -r '.result[].id // empty' 2>/dev/null)
+    # جستجوی تمام رکوردهای منطبق با این FQDN در کلادفلر
+    local api_res
+    api_res=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zid/dns_records?name=$name" \
+         -H "Authorization: Bearer $tok" -H "Content-Type: application/json" 2>/dev/null)
 
-    if [ -n "$rec_ids" ]; then
-        while IFS= read -r rid; do
-            if [ -n "$rid" ]; then
-                curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$zid/dns_records/$rid" \
-                     -H "Authorization: Bearer $tok" -H "Content-Type: application/json" >/dev/null
-                log OK "Cloudflare record deleted: $name ($ip)"
+    local count
+    count=$(echo "$api_res" | jq -r '.result | length' 2>/dev/null || echo 0)
+
+    if [ "$count" -gt 0 ]; then
+        local deleted=0
+        while IFS= read -r rec; do
+            local rid rcontent
+            rid=$(echo "$rec" | jq -r '.id')
+            rcontent=$(echo "$rec" | jq -r '.content')
+
+            # اگر آی‌پی مشخص شده بود، فقط همان آی‌پی پاک شود؛ در غیر این صورت هر رکوردی با این نام پاک شود
+            if [ -z "$ip" ] || [ "$rcontent" == "$ip" ]; then
+                local del_stat
+                del_stat=$(curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$zid/dns_records/$rid" \
+                     -H "Authorization: Bearer $tok" -H "Content-Type: application/json" | jq -r '.success // false' 2>/dev/null)
+                if [ "$del_stat" == "true" ]; then
+                    log OK "Cloudflare record purged: $name -> $rcontent"
+                    deleted=1
+                fi
             fi
-        done <<< "$rec_ids"
+        done < <(echo "$api_res" | jq -c '.result[]' 2>/dev/null)
+
+        if [ "$deleted" -eq 0 ] && [ -n "$ip" ]; then
+            log INFO "Cloudflare record not found: $name ($ip)"
+        fi
     else
-        log INFO "Cloudflare record already removed: $name ($ip)"
+        log INFO "Cloudflare record already clean: $name"
     fi
 }
 
@@ -217,8 +238,6 @@ deploy_new_node() {
     NODE_SSH_PORT=${NODE_SSH_PORT:-22}
     read -rp "$(echo -e "  ${C_PURPLE}▶ SSH User [root]: ${RST}")" NODE_SSH_USER < /dev/tty
     NODE_SSH_USER=${NODE_SSH_USER:-root}
-    
-    # آشکار کردن پرامپت رمز عبور به درخواست شما (بدون فلگ -s)
     read -rp "$(echo -e "  ${C_PURPLE}▶ SSH Password (Visible): ${RST}")" NODE_SSH_PASS < /dev/tty
 
     echo -e "\n  ${C_GRAY}ℹ Note: This subdomain is strictly used for Master Panel <-> Node orchestration.${RST}"
@@ -451,7 +470,6 @@ add_existing_active_node() {
     read -rp "  ▶ Remote SSH Port [22]: " E_PORT < /dev/tty
     E_PORT=${E_PORT:-22}
     read -rp "  ▶ Remote SSH User [root]: " E_USER < /dev/tty
-    E_USER=${E_USER:-root}
     read -rp "  ▶ Remote SSH Password (Visible): " E_PASS < /dev/tty
     echo ""
 
@@ -697,6 +715,110 @@ inspect_node_ssl_details() {
     fi
 }
 
+manage_node_dns_center() {
+    local n_idx="$1"
+    local t_host t_bdom
+    t_host=$(jq -r ".[$n_idx].hostname" "$NODES_FILE")
+    t_bdom=$(jq -r ".[$n_idx].base_domain" "$NODES_FILE")
+    local c_tok c_zid
+    c_tok=$(jq -r --arg bd "$t_bdom" '.[] | select(.domain == $bd) | .token' "$DOMAINS_FILE")
+    c_zid=$(jq -r --arg bd "$t_bdom" '.[] | select(.domain == $bd) | .zone_id' "$DOMAINS_FILE")
+
+    while true; do
+        ui_sub_banner
+        echo -e "  ${BOLD}${C_CYAN}🌐 CLOUDFLARE DNS MANAGEMENT FOR NODE: $t_host ($t_bdom)${RST}\n"
+        local recs=()
+        while IFS= read -r r; do [ -n "$r" ] && recs+=("$r"); done < <(jq -r ".[$n_idx].dns_records[]? // empty" "$NODES_FILE")
+
+        if [ ${#recs[@]} -eq 0 ]; then
+            echo -e "  ${C_YELLOW}No DNS records currently registered for this node.${RST}\n"
+        else
+            echo -e "  ${C_PURPLE}Active DNS Records in Inventory:${RST}"
+            for i in "${!recs[@]}"; do
+                echo -e "    ${C_CYAN}[$((i + 1))]${RST} ${recs[$i]}"
+            done
+            echo ""
+        fi
+
+        echo -e "    ${C_GREEN}[1]${RST} ➕ Add New Subdomain Record (Single IP or Multi-IP Pool)"
+        echo -e "    ${C_YELLOW}[2]${RST} ✏️  Edit Target IP / Tag of an Existing Record"
+        echo -e "    ${C_RED}[3]${RST} 🗑️  Delete a Record from Cloudflare & Local Inventory"
+        echo -e "    ${C_GRAY}[0]${RST} 🔙 Back to Node Dashboard"
+        read -rp "$(echo -e "\n  ${C_PURPLE}▶ Choose DNS Action [0-3]: ${RST}")" DNS_ACT < /dev/tty
+
+        case "$DNS_ACT" in
+            1)
+                read -rp "  ▶ Subdomain prefix (ex: pool1-1 or cdn): " NEW_SUB < /dev/tty
+                read -rp "  ▶ Target IP(s) (comma-separated for Round-Robin): " NEW_IPS < /dev/tty
+                read -rp "  ▶ Cloudflare Comment Tag [RoundRobin]: " NEW_TAG < /dev/tty
+                NEW_TAG=${NEW_TAG:-RoundRobin}
+                if [ -n "$NEW_SUB" ] && [ -n "$NEW_IPS" ]; then
+                    local target_fqdn="${NEW_SUB}.${t_bdom}"
+                    IFS=',' read -ra IPS_TO_ADD <<< "$NEW_IPS"
+                    for raw_i in "${IPS_TO_ADD[@]}"; do
+                        local cl_ip; cl_ip=$(echo "$raw_i" | tr -d ' ')
+                        if [ -n "$cl_ip" ]; then
+                            upsert_cloudflare_dns "$c_zid" "$c_tok" "$target_fqdn" "$cl_ip" "PG-Node: $t_host | $NEW_TAG"
+                            local entry_str="$target_fqdn ($cl_ip)"
+                            local tmp_f; tmp_f=$(mktemp)
+                            jq --arg n "$idx_pos" --arg e "$entry_str" '.[($n|tonumber)].dns_records += [$e]' "$NODES_FILE" > "$tmp_f" && mv "$tmp_f" "$NODES_FILE"
+                            log OK "Added DNS Record $entry_str"
+                        fi
+                    done
+                fi
+                read -rp "  Press [ENTER] to continue..." < /dev/tty
+                ;;
+            2)
+                if [ ${#recs[@]} -gt 0 ]; then
+                    read -rp "  ▶ Select record number to edit [1-${#recs[@]}]: " R_EDIT < /dev/tty
+                    if [[ "$R_EDIT" =~ ^[0-9]+$ ]] && [ "$R_EDIT" -ge 1 ] && [ "$R_EDIT" -le "${#recs[@]}" ]; then
+                        local chosen_entry="${recs[$((R_EDIT - 1))]}"
+                        local fqdn curr_ip
+                        fqdn=$(echo "$chosen_entry" | awk '{print $1}')
+                        curr_ip=$(echo "$chosen_entry" | sed -n 's/.*(\(.*\)).*/\1/p' | tr -d ' ')
+                        read -rp "  ▶ New IP Address [$curr_ip]: " NEW_R_IP < /dev/tty
+                        NEW_R_IP=${NEW_R_IP:-"$curr_ip"}
+                        read -rp "  ▶ New Comment tag: " NEW_R_TAG < /dev/tty
+                        NEW_R_TAG=${NEW_R_TAG:-"Custom"}
+                        local full_comment="PG-Node: $t_host | $NEW_R_TAG"
+                        local rec_id
+                        local rtype="A"; [[ "$curr_ip" == *:* ]] && rtype="AAAA"
+                        rec_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records?name=$fqdn&type=$rtype&content=$curr_ip" \
+                             -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" | jq -r '.result[0].id // empty' 2>/dev/null)
+                        if [ -n "$rec_id" ]; then
+                            local new_rtype="A"; [[ "$NEW_R_IP" == *:* ]] && new_rtype="AAAA"
+                            curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$c_zid/dns_records/$rec_id" \
+                                 -H "Authorization: Bearer $c_tok" -H "Content-Type: application/json" \
+                                 --data "{\"type\":\"$new_rtype\",\"name\":\"$fqdn\",\"content\":\"$NEW_R_IP\",\"ttl\":1,\"proxied\":false,\"comment\":\"$full_comment\"}" >/dev/null
+                            local updated_entry="$fqdn ($NEW_R_IP)"
+                            local tmp_u; tmp_u=$(mktemp)
+                            jq --arg n "$idx_pos" --arg o "$chosen_entry" --arg u "$updated_entry" \
+                               '.[($n|tonumber)].dns_records = [.[($n|tonumber)].dns_records[] | if . == $o then $u else . end]' "$NODES_FILE" > "$tmp_u" && mv "$tmp_u" "$NODES_FILE"
+                            log OK "Updated DNS record to $NEW_R_IP"
+                        fi
+                    fi
+                fi
+                read -rp "  Press [ENTER] to continue..." < /dev/tty
+                ;;
+            3)
+                if [ ${#recs[@]} -gt 0 ]; then
+                    read -rp "  ▶ Select record number to delete [1-${#recs[@]}]: " R_DEL < /dev/tty
+                    if [[ "$R_DEL" =~ ^[0-9]+$ ]] && [ "$R_DEL" -ge 1 ] && [ "$R_DEL" -le "${#recs[@]}" ]; then
+                        local del_entry="${recs[$((R_DEL - 1))]}"
+                        delete_cloudflare_dns_record "$c_zid" "$c_tok" "$del_entry"
+                        local tmp_del; tmp_del=$(mktemp)
+                        jq --arg n "$idx_pos" --arg o "$del_entry" '.[($n|tonumber)].dns_records = [.[($n|tonumber)].dns_records[] | select(. != $o)]' "$NODES_FILE" > "$tmp_del" && mv "$tmp_del" "$NODES_FILE"
+                        log OK "Record removed from local inventory."
+                    fi
+                fi
+                read -rp "  Press [ENTER] to continue..." < /dev/tty
+                ;;
+            0) break ;;
+            *) ;;
+        esac
+    done
+}
+
 manage_saved_nodes() {
     while true; do
         ui_sub_banner
@@ -764,7 +886,6 @@ manage_saved_nodes() {
             local xray_version
             xray_version=$(sshpass -p "$target_pass" ssh -p $target_port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=2 "$target_user@$target_ip" "export PATH=/usr/local/bin:\$PATH; pg-node 2>/dev/null | grep -A1 'Current Xray-core version:' | tail -n1 | tr -d ' \r'" 2>/dev/null || echo "Not detected")
 
-            # شناسایی مسیرهای مستقیم فایل سرتیفیکیت و کلید فعال روی سرور
             local live_cert_path="/var/lib/pg-node/certs/ssl_cert.pem"
             local live_key_path="/var/lib/pg-node/certs/ssl_key.pem"
             if [ -n "$target_bdom" ] && [ "$target_bdom" != "null" ]; then
