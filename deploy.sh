@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# PasarGuard Multi-Node Auto-Deployer (v9.1 - Bulletproof Cloudflare Purge)
+# PasarGuard Multi-Node Auto-Deployer (v9.3 - Bulletproof Cloudflare Purge)
 # Developed by Saeed SK (@saeedsk32)
 # ==============================================================================
 
@@ -32,7 +32,7 @@ ui_banner() {
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██████╔╝██║  ███╗${RST}${BOLD}${C_PURPLE}██║  ██║█████╗  ██████╔╝██║     ██║   ██║ ╚████╔╝ ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██╔═══╝ ██║   ██║${RST}${BOLD}${C_PURPLE}██║  ██║██╔══╝  ██╔═══╝ ██║     ██║   ██║  ╚██╔╝  ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██║     ╚██████╔╝${RST}${BOLD}${C_PURPLE}██████╔╝███████╗██║     ███████╗╚██████╔╝   ██║   ${RST}   ${C_CYAN}│${RST}"
-    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v9.1 (Production)${RST}           ${C_CYAN}│${RST}"
+    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v9.3 (Production)${RST}           ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
 }
 
@@ -1345,6 +1345,100 @@ backup_restore_center() {
     done
 }
 
+
+web_panel_menu() {
+    local WEB_CONF="$APP_DIR/web_config.json"
+    if [ ! -f "$WEB_CONF" ]; then
+        echo '{"port": 5050, "username": "admin", "password": "admin123", "ssl_domain": ""}' > "$WEB_CONF"
+    fi
+
+    while true; do
+        ui_sub_banner
+        echo -e "  ${BOLD}${C_CYAN}MODULE 6: LIGHTWEIGHT WEB DASHBOARD MANAGER${RST}"
+        echo -e "  ${C_GRAY}Zero-bloat Flask Web UI synced with your local JSON inventory${RST}\n"
+
+        local w_port w_user w_pass w_ssl w_status w_proto="http"
+        w_port=$(jq -r ".port // 5050" "$WEB_CONF" 2>/dev/null)
+        w_user=$(jq -r ".username // \"admin\"" "$WEB_CONF" 2>/dev/null)
+        w_pass=$(jq -r ".password // \"admin123\"" "$WEB_CONF" 2>/dev/null)
+        w_ssl=$(jq -r ".ssl_domain // \"\"" "$WEB_CONF" 2>/dev/null)
+        [ -n "$w_ssl" ] && [ -f "/etc/letsencrypt/live/$w_ssl/fullchain.pem" ] && w_proto="https"
+
+        local srv_ip
+        srv_ip=$(curl -s4 --max-time 2 ifconfig.me || hostname -I | awk "{print \$1}")
+        local access_host="${w_ssl:-$srv_ip}"
+
+        if systemctl is-active --quiet pg-deploy-web.service; then
+            w_status="${C_GREEN}● Running (Active)${RST}"
+        else
+            w_status="${C_RED}○ Stopped (0 MB RAM used)${RST}"
+        fi
+
+        echo -e "  ${C_GREEN}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
+        echo -e "  ${C_GREEN}┃ WEB CONTROL CENTER STATUS & CREDENTIALS${RST}"
+        echo -e "  ${C_GREEN}┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
+        echo -e "  ${C_GREEN}┃${RST}  Service Status : $w_status"
+        echo -e "  ${C_GREEN}┃${RST}  Access URL     : ${BOLD}${C_CYAN}${w_proto}://${access_host}:${w_port}${RST}"
+        echo -e "  ${C_GREEN}┃${RST}  Username       : ${C_WHITE}${w_user}${RST}"
+        echo -e "  ${C_GREEN}┃${RST}  Password       : ${C_YELLOW}${w_pass}${RST}"
+        echo -e "  ${C_GREEN}┃${RST}  SSL Domain     : ${C_PURPLE}${w_ssl:-None (HTTP Mode)}${RST}"
+        echo -e "  ${C_GREEN}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}\n"
+
+        echo -e "    ${C_GREEN}[1]${RST} ▶️  Start / Restart Web Dashboard"
+        echo -e "    ${C_RED}[2]${RST} ⏹️  Stop Web Dashboard (Free all memory)"
+        echo -e "    ${C_CYAN}[3]${RST} 🔑 Change Port, Username & Password"
+        echo -e "    ${C_PURPLE}[4]${RST} 🔒 Bind Wildcard SSL Domain for HTTPS"
+        echo -e "    ${C_GRAY}[0]${RST} 🔙 Back to Main Dashboard"
+        read -rp "$(echo -e "\n  ${C_PURPLE}▶ Select Option [0-4]: ${RST}")" W_OPT < /dev/tty
+
+        case "$W_OPT" in
+            1)
+                ufw allow "$w_port"/tcp >/dev/null 2>&1 || true
+                systemctl enable --now pg-deploy-web.service >/dev/null 2>&1
+                systemctl restart pg-deploy-web.service
+                log OK "Web Dashboard started on port $w_port!"
+                read -rp "  Press [ENTER] to continue..." < /dev/tty
+                ;;
+            2)
+                systemctl disable --now pg-deploy-web.service >/dev/null 2>&1
+                log OK "Web Dashboard stopped completely."
+                read -rp "  Press [ENTER] to continue..." < /dev/tty
+                ;;
+            3)
+                read -rp "  ▶ Enter Web Port [$w_port]: " NP < /dev/tty
+                NP=${NP:-$w_port}
+                read -rp "  ▶ Enter Web Username [$w_user]: " NU < /dev/tty
+                NU=${NU:-$w_user}
+                read -rp "  ▶ Enter Web Password [$w_pass]: " NPW < /dev/tty
+                NPW=${NPW:-$w_pass}
+                local tmp_w; tmp_w=$(mktemp)
+                jq --arg p "$NP" --arg u "$NU" --arg pw "$NPW" ".port = (\$p|tonumber) | .username = \$u | .password = \$pw" "$WEB_CONF" > "$tmp_w" && mv "$tmp_w" "$WEB_CONF"
+                ufw allow "$NP"/tcp >/dev/null 2>&1 || true
+                systemctl is-active --quiet pg-deploy-web.service && systemctl restart pg-deploy-web.service
+                log OK "Web credentials & port updated."
+                read -rp "  Press [ENTER] to continue..." < /dev/tty
+                ;;
+            4)
+                list_domain_profiles
+                local dc; dc=$(get_domains_count)
+                if [ "$dc" -gt 0 ]; then
+                    read -rp "  ▶ Select Domain number for HTTPS (or 0 for HTTP): " SD < /dev/tty
+                    local sel_dom=""
+                    if [[ "$SD" =~ ^[0-9]+$ ]] && [ "$SD" -ge 1 ] && [ "$SD" -le "$dc" ]; then
+                        sel_dom=$(jq -r ".[$((SD - 1))].domain" "$DOMAINS_FILE")
+                    fi
+                    local tmp_s; tmp_s=$(mktemp)
+                    jq --arg d "$sel_dom" ".ssl_domain = \$d" "$WEB_CONF" > "$tmp_s" && mv "$tmp_s" "$WEB_CONF"
+                    systemctl is-active --quiet pg-deploy-web.service && systemctl restart pg-deploy-web.service
+                    log OK "SSL binding updated."
+                fi
+                read -rp "  Press [ENTER] to continue..." < /dev/tty
+                ;;
+            0) break ;;
+        esac
+    done
+}
+
 view_logs() {
     ui_sub_banner
     echo -e "  ${BOLD}${C_CYAN}MODULE 5: DIAGNOSTICS & OPERATION LOG TRACE${RST}"
@@ -1371,9 +1465,10 @@ while true; do
     echo -e "  ${BOLD}${C_CYAN}[3] ⚡ Cloudflare DNS Center${RST}       Clean IPs Table, Presets Templates"
     echo -e "  ${BOLD}${C_CYAN}[4] 💾 Backup & Restore Center${RST}     1-Click Download Link & Recovery"
     echo -e "  ${BOLD}${C_CYAN}[5] 📋 Diagnostics & Log Trace${RST}     View Live Operations History"
+    echo -e "  ${BOLD}${C_GREEN}[6] 🌐 Web Dashboard Manager${RST}       1-Click Copy UI, Start/Stop & HTTPS"
     echo -e "  ${BOLD}${C_GRAY}[0] 🚪 Exit${RST}"
     echo -e "\n${C_CYAN}────────────────────────────────────────────────────────────────────────${RST}"
-    read -rp "$(echo -e "  ${C_PURPLE}▶ Select Module [0-5]: ${RST}")" MAIN_CHOICE < /dev/tty
+    read -rp "$(echo -e "  ${C_PURPLE}▶ Select Module [0-6]: ${RST}")" MAIN_CHOICE < /dev/tty
 
     case "$MAIN_CHOICE" in
         1) node_management_menu ;;
@@ -1381,6 +1476,7 @@ while true; do
         3) cloudflare_dns_center ;;
         4) backup_restore_center ;;
         5) view_logs ;;
+        6) web_panel_menu ;;
         0) echo -e "\n  ${C_GREEN}Goodbye!${RST}\n"; exit 0 ;;
         *) ;;
     esac
