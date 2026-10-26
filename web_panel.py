@@ -14,12 +14,11 @@ WEB_CONF_FILE = os.path.join(APP_DIR, "web_config.json")
 
 app = Flask(__name__)
 
-# Server-side in-memory cache for fast response
 SERVER_CACHE = {
     "status": {},
     "vault": {}
 }
-CACHE_TTL = 60  # seconds
+CACHE_TTL = 60
 
 def load_json(path, default):
     if not os.path.exists(path):
@@ -49,13 +48,9 @@ def get_master_ip():
 
 def get_web_config():
     return load_json(WEB_CONF_FILE, {
-        "mode": "ip",
         "port": 5050,
         "username": "admin",
-        "password": "admin123",
-        "ssl_domain": "",
-        "panel_fqdn": "",
-        "panel_ip": ""
+        "password": "admin123"
     })
 
 def check_auth(username, password):
@@ -76,75 +71,6 @@ def requires_auth(f):
             return authenticate()
         return f(*args, **kwargs)
     return decorated
-
-def cf_upsert_record(zone_id, token, fqdn, ip, comment="PG-Deployer Web Panel"):
-    rec_type = "AAAA" if ":" in ip else "A"
-    get_cmd = [
-        "curl", "-s", "-X", "GET",
-        f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?name={fqdn}&type={rec_type}",
-        "-H", f"Authorization: Bearer {token}", "-H", "Content-Type: application/json"
-    ]
-    res = subprocess.run(get_cmd, capture_output=True, text=True)
-    rec_id = ""
-    try:
-        items = json.loads(res.stdout).get("result", [])
-        if items:
-            rec_id = items[0].get("id", "")
-    except Exception:
-        pass
-
-    payload = json.dumps({
-        "type": rec_type,
-        "name": fqdn,
-        "content": ip,
-        "ttl": 1,
-        "proxied": False,
-        "comment": comment
-    })
-
-    if rec_id:
-        put_cmd = [
-            "curl", "-s", "-X", "PUT",
-            f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{rec_id}",
-            "-H", f"Authorization: Bearer {token}", "-H", "Content-Type: application/json",
-            "--data", payload
-        ]
-        subprocess.run(put_cmd, capture_output=True)
-    else:
-        post_cmd = [
-            "curl", "-s", "-X", "POST",
-            f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
-            "-H", f"Authorization: Bearer {token}", "-H", "Content-Type: application/json",
-            "--data", payload
-        ]
-        subprocess.run(post_cmd, capture_output=True)
-    return True
-
-def cf_delete_record_by_name(zone_id, token, fqdn):
-    if not fqdn or not zone_id or not token:
-        return 0
-    get_cmd = [
-        "curl", "-s", "-X", "GET",
-        f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?name={fqdn}",
-        "-H", f"Authorization: Bearer {token}", "-H", "Content-Type: application/json"
-    ]
-    res = subprocess.run(get_cmd, capture_output=True, text=True)
-    deleted_count = 0
-    try:
-        items = json.loads(res.stdout).get("result", [])
-        for it in items:
-            rid = it.get("id")
-            if rid:
-                del_cmd = [
-                    "curl", "-s", "-X", "DELETE",
-                    f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{rid}",
-                    "-H", f"Authorization: Bearer {token}", "-H", "Content-Type: application/json"
-                ]
-                subprocess.run(del_cmd, capture_output=True)
-                deleted_count += 1
-    except Exception:
-        pass
-    return deleted_count
 
 def run_ssh(node, cmd, timeout=15):
     ip = node.get("ip")
@@ -172,7 +98,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PasarGuard Deployer — Web Control Center v9.3</title>
+    <title>PasarGuard Deployer — IP Web Control Center</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body { background-color: #0b0f19; color: #e2e8f0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -189,17 +115,12 @@ HTML_TEMPLATE = """
             <div>
                 <div class="flex flex-wrap items-center gap-3">
                     <span class="text-2xl font-bold text-cyan-400">⚡ PasarGuard Deployer</span>
-                    <span class="bg-emerald-500/20 text-emerald-400 text-xs px-2.5 py-1 rounded border border-emerald-500/40">v9.3 Instant-Cache</span>
-                    {% if web_conf.mode == 'domain' and web_conf.panel_fqdn %}
-                    <span class="bg-purple-500/20 text-purple-300 text-xs px-2.5 py-1 rounded border border-purple-500/40">🔒 Domain Mode ({{ web_conf.panel_fqdn }})</span>
-                    {% else %}
-                    <span class="bg-amber-500/20 text-amber-300 text-xs px-2.5 py-1 rounded border border-amber-500/40">🖥️ IP Mode ({{ master_ip }})</span>
-                    {% endif %}
+                    <span class="bg-emerald-500/20 text-emerald-400 text-xs px-2.5 py-1 rounded border border-emerald-500/40">IP Mode Only</span>
+                    <span class="bg-amber-500/20 text-amber-300 text-xs px-2.5 py-1 rounded border border-amber-500/40">🖥️ http://{{ master_ip }}:{{ web_conf.port }}</span>
                 </div>
                 <p class="text-gray-400 text-xs mt-1">Automated Multi-Node & Multi-SSL Orchestrator by Saeed SK (@saeedsk32)</p>
             </div>
             <div class="flex flex-wrap gap-2 text-xs">
-                <button onclick="openModeModal()" class="bg-purple-600 hover:bg-purple-500 text-white px-3.5 py-2 rounded font-bold btn">🌐 Access Mode (IP / Domain)</button>
                 <button onclick="forceRefreshAll()" class="bg-cyan-600 hover:bg-cyan-500 text-white px-3.5 py-2 rounded font-bold btn">🔄 Force Refresh</button>
             </div>
         </div>
@@ -302,51 +223,6 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- Web Panel Mode Switcher Modal (IP vs Domain + Cloudflare Auto DNS) -->
-    <div id="mode-modal" class="fixed inset-0 bg-black/80 hidden items-center justify-center p-4 z-40">
-        <div class="bg-gray-900 border border-purple-500/50 rounded-lg max-w-xl w-full p-6 shadow-2xl text-xs">
-            <div class="flex justify-between items-center border-b border-gray-800 pb-3 mb-4">
-                <h3 class="text-base font-bold text-purple-400">🌐 Web Panel Access Mode (IP vs Domain)</h3>
-                <button onclick="closeModeModal()" class="text-gray-400 hover:text-white text-lg font-bold">✕</button>
-            </div>
-
-            <div class="bg-gray-950 border border-gray-800 rounded p-3.5 mb-4 space-y-1">
-                <div>Current Mode: <span class="font-bold text-emerald-400 uppercase">{{ web_conf.mode }}</span></div>
-                <div>Master Server IP: <span class="text-cyan-300">{{ master_ip }}</span></div>
-                <div>Active Domain FQDN: <span class="text-purple-300">{{ web_conf.panel_fqdn or 'None (Raw IP Mode)' }}</span></div>
-                <div>Port: <span class="text-white">{{ web_conf.port }}</span></div>
-            </div>
-
-            <!-- Switch to Domain Mode Box -->
-            <div class="bg-gray-800/60 border border-purple-500/30 rounded p-4 mb-4">
-                <h4 class="font-bold text-purple-300 mb-2">🔒 Option 1: Switch to Domain Mode (HTTPS + Auto Cloudflare DNS)</h4>
-                <p class="text-gray-400 mb-3">Automatically creates an unproxied A record in Cloudflare pointing to <code class="text-white">{{ master_ip }}</code> and activates Let's Encrypt Wildcard HTTPS.</p>
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
-                    <div>
-                        <label class="block text-gray-400 mb-1">Subdomain Prefix:</label>
-                        <input id="inp-sub-prefix" type="text" placeholder="e.g. panel or deploy" value="panel" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1.5 text-white">
-                    </div>
-                    <div>
-                        <label class="block text-gray-400 mb-1">Select Base Domain:</label>
-                        <select id="inp-base-dom" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1.5 text-white">
-                            {% for d in domains %}
-                            <option value="{{ d.domain }}">{{ d.domain }}</option>
-                            {% endfor %}
-                        </select>
-                    </div>
-                </div>
-                <button onclick="switchPanelMode('domain')" class="w-full bg-purple-600 hover:bg-purple-500 text-white py-2 rounded font-bold btn">🚀 Setup Cloudflare Record & Switch to Domain Mode</button>
-            </div>
-
-            <!-- Switch to IP Mode Box -->
-            <div class="bg-gray-800/60 border border-amber-500/30 rounded p-4">
-                <h4 class="font-bold text-amber-300 mb-2">🖥️ Option 2: Switch to Raw IP Mode (HTTP + Purge Cloudflare Record)</h4>
-                <p class="text-gray-400 mb-3">Switches panel back to <code class="text-white">http://{{ master_ip }}:{{ web_conf.port }}</code> and <b>automatically deletes</b> the panel's subdomain record from Cloudflare.</p>
-                <button onclick="switchPanelMode('ip')" class="w-full bg-amber-600 hover:bg-amber-500 text-white py-2 rounded font-bold btn">🗑️ Delete Cloudflare Record & Revert to IP Mode</button>
-            </div>
-        </div>
-    </div>
-
     <!-- Multi-SSL Vault Modal -->
     <div id="vault-modal" class="fixed inset-0 bg-black/80 hidden items-center justify-center p-4 z-40">
         <div class="bg-gray-900 border border-cyan-500/50 rounded-lg max-w-4xl w-full max-h-[90vh] flex flex-col shadow-2xl">
@@ -364,7 +240,7 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
-        const CACHE_PREFIX = 'pg_deploy_v93_';
+        const CACHE_PREFIX = 'pg_deploy_ipmode_';
 
         function showToast(msg, isErr=false) {
             const t = document.getElementById('toast');
@@ -581,46 +457,6 @@ HTML_TEMPLATE = """
             modal.classList.remove('flex');
         }
 
-        function openModeModal() {
-            const modal = document.getElementById('mode-modal');
-            modal.classList.remove('hidden');
-            modal.classList.add('flex');
-        }
-
-        function closeModeModal() {
-            const modal = document.getElementById('mode-modal');
-            modal.classList.add('hidden');
-            modal.classList.remove('flex');
-        }
-
-        async function switchPanelMode(targetMode) {
-            const subPrefix = document.getElementById('inp-sub-prefix')?.value || 'panel';
-            const baseDom = document.getElementById('inp-base-dom')?.value || '';
-            showToast(`⏳ Switching panel to ${targetMode.toUpperCase()} mode...`);
-            try {
-                const res = await fetch('/api/panel/mode', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        mode: targetMode,
-                        sub_prefix: subPrefix.trim(),
-                        base_domain: baseDom.trim()
-                    })
-                });
-                const data = await res.json();
-                if (data.ok) {
-                    showToast(`✔ ${data.message}`);
-                    setTimeout(() => {
-                        window.location.href = data.redirect_url;
-                    }, 2000);
-                } else {
-                    showToast(`✖ ${data.message}`, true);
-                }
-            } catch (e) {
-                showToast('✖ Failed to switch mode', true);
-            }
-        }
-
         document.addEventListener('DOMContentLoaded', () => {
             const count = {{ nodes|length }};
             for (let i = 0; i < count; i++) {
@@ -648,74 +484,6 @@ def index():
     ))
     resp.headers["Cache-Control"] = "private, max-age=15, stale-while-revalidate=60"
     return resp
-
-@app.route("/api/panel/mode", methods=["POST"])
-@requires_auth
-def switch_panel_mode():
-    conf = get_web_config()
-    domains = load_json(DOMAINS_FILE, [])
-    data = request.json or {}
-    target_mode = data.get("mode", "ip")
-    port = conf.get("port", 5050)
-    master_ip = get_master_ip()
-
-    if target_mode == "domain":
-        base_dom = data.get("base_domain", "").strip()
-        sub_prefix = data.get("sub_prefix", "panel").strip()
-        if not base_dom or not sub_prefix:
-            return jsonify({"ok": False, "message": "Domain and subdomain prefix are required."})
-
-        dom_obj = next((d for d in domains if d.get("domain") == base_dom), None)
-        if not dom_obj:
-            return jsonify({"ok": False, "message": f"Domain {base_dom} not found in registered domains."})
-
-        # If a previous different panel_fqdn existed, clean it first
-        old_fqdn = conf.get("panel_fqdn", "")
-        old_dom = conf.get("ssl_domain", "")
-        fqdn = f"{sub_prefix}.{base_dom}"
-        if old_fqdn and old_fqdn != fqdn and old_dom:
-            old_obj = next((d for d in domains if d.get("domain") == old_dom), None)
-            if old_obj:
-                cf_delete_record_by_name(old_obj["zone_id"], old_obj["token"], old_fqdn)
-
-        cf_upsert_record(dom_obj["zone_id"], dom_obj["token"], fqdn, master_ip, "PG-Deployer Web Panel")
-
-        conf["mode"] = "domain"
-        conf["ssl_domain"] = base_dom
-        conf["panel_fqdn"] = fqdn
-        conf["panel_ip"] = master_ip
-        save_json(WEB_CONF_FILE, conf)
-
-        # Restart service in background after 1 second
-        subprocess.Popen(["bash", "-c", "sleep 1 && systemctl restart pg-deploy-web.service"])
-        proto = "https" if os.path.exists(f"/etc/letsencrypt/live/{base_dom}/fullchain.pem") else "http"
-        return jsonify({
-            "ok": True,
-            "message": f"Created Cloudflare DNS {fqdn} -> {master_ip} & enabled {proto.upper()}!",
-            "redirect_url": f"{proto}://{fqdn}:{port}"
-        })
-
-    else:
-        # Switch to IP mode & delete Cloudflare DNS record
-        old_fqdn = conf.get("panel_fqdn", "")
-        old_dom = conf.get("ssl_domain", "")
-        if old_fqdn and old_dom:
-            old_obj = next((d for d in domains if d.get("domain") == old_dom), None)
-            if old_obj:
-                cf_delete_record_by_name(old_obj["zone_id"], old_obj["token"], old_fqdn)
-
-        conf["mode"] = "ip"
-        conf["ssl_domain"] = ""
-        conf["panel_fqdn"] = ""
-        conf["panel_ip"] = master_ip
-        save_json(WEB_CONF_FILE, conf)
-
-        subprocess.Popen(["bash", "-c", "sleep 1 && systemctl restart pg-deploy-web.service"])
-        return jsonify({
-            "ok": True,
-            "message": f"Deleted {old_fqdn or 'domain'} from Cloudflare & switched to IP Mode!",
-            "redirect_url": f"http://{master_ip}:{port}"
-        })
 
 @app.route("/api/node/<int:idx>/status")
 @requires_auth
@@ -852,7 +620,6 @@ def node_action(idx):
     data = request.json or {}
     act = data.get("action")
 
-    # Invalidate server cache for this node
     SERVER_CACHE["status"].pop(idx, None)
     SERVER_CACHE["vault"].pop(idx, None)
 
@@ -880,6 +647,20 @@ def node_action(idx):
         bdom = n.get("base_domain")
         dom_obj = next((d for d in domains if d.get("domain") == bdom), None)
         if dom_obj:
+            def cf_upsert_record(zone_id, token, fqdn, ip, comment):
+                rec_type = "AAAA" if ":" in ip else "A"
+                get_cmd = ["curl", "-s", "-X", "GET", f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?name={fqdn}&type={rec_type}", "-H", f"Authorization: Bearer {token}", "-H", "Content-Type: application/json"]
+                res = subprocess.run(get_cmd, capture_output=True, text=True)
+                rec_id = ""
+                try:
+                    items = json.loads(res.stdout).get("result", [])
+                    if items: rec_id = items[0].get("id", "")
+                except Exception: pass
+                payload = json.dumps({"type": rec_type, "name": fqdn, "content": ip, "ttl": 1, "proxied": False, "comment": comment})
+                if rec_id:
+                    subprocess.run(["curl", "-s", "-X", "PUT", f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{rec_id}", "-H", f"Authorization: Bearer {token}", "-H", "Content-Type: application/json", "--data", payload], capture_output=True)
+                else:
+                    subprocess.run(["curl", "-s", "-X", "POST", f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records", "-H", f"Authorization: Bearer {token}", "-H", "Content-Type: application/json", "--data", payload], capture_output=True)
             cf_upsert_record(dom_obj["zone_id"], dom_obj["token"], n.get("address"), new_ip, f"PG-Node: {n.get('hostname')} | Migrated")
         nodes[idx]["ip"] = new_ip
         save_json(NODES_FILE, nodes)
@@ -895,7 +676,14 @@ def node_action(idx):
             tok = dom_obj["token"]
             for rec_entry in n.get("dns_records", []):
                 fqdn = rec_entry.split()[0].strip()
-                cf_delete_record_by_name(zid, tok, fqdn)
+                get_cmd = ["curl", "-s", "-X", "GET", f"https://api.cloudflare.com/client/v4/zones/{zid}/dns_records?name={fqdn}", "-H", f"Authorization: Bearer {tok}", "-H", "Content-Type: application/json"]
+                res = subprocess.run(get_cmd, capture_output=True, text=True)
+                try:
+                    for it in json.loads(res.stdout).get("result", []):
+                        rid = it.get("id")
+                        if rid:
+                            subprocess.run(["curl", "-s", "-X", "DELETE", f"https://api.cloudflare.com/client/v4/zones/{zid}/dns_records/{rid}", "-H", f"Authorization: Bearer {tok}", "-H", "Content-Type: application/json"], capture_output=True)
+                except Exception: pass
         nodes.pop(idx)
         save_json(NODES_FILE, nodes)
         return jsonify({"ok": True, "message": "Node uninstalled and DNS records purged"})
@@ -905,11 +693,4 @@ def node_action(idx):
 if __name__ == "__main__":
     conf = get_web_config()
     port = int(conf.get("port", 5050))
-    mode = conf.get("mode", "ip")
-    ssl_dom = conf.get("ssl_domain", "").strip()
-    cert_f = f"/etc/letsencrypt/live/{ssl_dom}/fullchain.pem"
-    key_f = f"/etc/letsencrypt/live/{ssl_dom}/privkey.pem"
-    if mode == "domain" and ssl_dom and os.path.exists(cert_f) and os.path.exists(key_f):
-        app.run(host="0.0.0.0", port=port, ssl_context=(cert_f, key_f))
-    else:
-        app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port)

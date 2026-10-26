@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# PasarGuard Multi-Node Auto-Deployer (v9.3 - Bulletproof Cloudflare Purge)
+# PasarGuard Multi-Node Auto-Deployer (v9.4 - Bulletproof Cloudflare Purge)
 # Developed by Saeed SK (@saeedsk32)
 # ==============================================================================
 
@@ -32,7 +32,7 @@ ui_banner() {
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██████╔╝██║  ███╗${RST}${BOLD}${C_PURPLE}██║  ██║█████╗  ██████╔╝██║     ██║   ██║ ╚████╔╝ ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██╔═══╝ ██║   ██║${RST}${BOLD}${C_PURPLE}██║  ██║██╔══╝  ██╔═══╝ ██║     ██║   ██║  ╚██╔╝  ${RST}   ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}│${RST}  ${BOLD}${C_BLUE}██║     ╚██████╔╝${RST}${BOLD}${C_PURPLE}██████╔╝███████╗██║     ███████╗╚██████╔╝   ██║   ${RST}   ${C_CYAN}│${RST}"
-    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v9.3 (Production)${RST}           ${C_CYAN}│${RST}"
+    echo -e "${C_CYAN}│${RST}  ${DIM}Automated DevOps by Saeed SK (@saeedsk32) v9.4 (Production)${RST}           ${C_CYAN}│${RST}"
     echo -e "${C_CYAN}╰────────────────────────────────────────────────────────────────────────╯${RST}"
 }
 
