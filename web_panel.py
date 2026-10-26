@@ -14,83 +14,53 @@ WEB_CONF_FILE = os.path.join(APP_DIR, "web_config.json")
 
 app = Flask(__name__)
 
-SERVER_CACHE = {
-    "status": {},
-    "vault": {}
-}
+SERVER_CACHE = {"status": {}, "vault": {}}
 CACHE_TTL = 60
 
 def load_json(path, default):
-    if not os.path.exists(path):
-        return default
+    if not os.path.exists(path): return default
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
+        with open(path, "r", encoding="utf-8") as f: return json.load(f)
+    except Exception: return default
 
 def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    with open(path, "w", encoding="utf-8") as f: json.dump(data, f, indent=2, ensure_ascii=False)
 
 def get_master_ip():
     try:
         res = subprocess.run(["curl", "-s4", "--max-time", "3", "ifconfig.me"], capture_output=True, text=True)
-        if res.returncode == 0 and res.stdout.strip():
-            return res.stdout.strip()
-    except Exception:
-        pass
+        if res.returncode == 0 and res.stdout.strip(): return res.stdout.strip()
+    except Exception: pass
     try:
         res = subprocess.run(["hostname", "-I"], capture_output=True, text=True)
         return res.stdout.strip().split()[0]
-    except Exception:
-        return "127.0.0.1"
+    except Exception: return "127.0.0.1"
 
 def get_web_config():
-    return load_json(WEB_CONF_FILE, {
-        "port": 5050,
-        "username": "admin",
-        "password": "admin123"
-    })
+    return load_json(WEB_CONF_FILE, {"port": 5050, "username": "admin", "password": "admin123"})
 
 def check_auth(username, password):
     conf = get_web_config()
     return username == conf.get("username", "admin") and password == conf.get("password", "admin123")
 
 def authenticate():
-    return Response(
-        "Authentication Required", 401,
-        {"WWW-Authenticate": 'Basic realm="PasarGuard Deployer Web"'}
-    )
+    return Response("Authentication Required", 401, {"WWW-Authenticate": 'Basic realm="PasarGuard Deployer Web"'})
 
 def requires_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         auth = request.authorization
-        if not auth or not check_auth(auth.username, auth.password):
-            return authenticate()
+        if not auth or not check_auth(auth.username, auth.password): return authenticate()
         return f(*args, **kwargs)
     return decorated
 
 def run_ssh(node, cmd, timeout=15):
-    ip = node.get("ip")
-    port = str(node.get("ssh_port", 22))
-    user = node.get("ssh_user", "root")
-    pw = node.get("ssh_pass", "")
-    ssh_cmd = [
-        "sshpass", "-p", pw,
-        "ssh", "-p", port,
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null",
-        "-o", "LogLevel=ERROR",
-        "-o", f"ConnectTimeout={timeout}",
-        f"{user}@{ip}", cmd
-    ]
+    ip, port, user, pw = node.get("ip"), str(node.get("ssh_port", 22)), node.get("ssh_user", "root"), node.get("ssh_pass", "")
+    ssh_cmd = ["sshpass", "-p", pw, "ssh", "-p", port, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR", "-o", f"ConnectTimeout={timeout}", f"{user}@{ip}", cmd]
     try:
         res = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=timeout+5)
         return res.returncode == 0, res.stdout.strip(), res.stderr.strip()
-    except Exception as e:
-        return False, "", str(e)
+    except Exception as e: return False, "", str(e)
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -98,7 +68,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PasarGuard Deployer — IP Web Control Center</title>
+    <title>PasarGuard Deployer — Web Control Center v0.9.9</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body { background-color: #0b0f19; color: #e2e8f0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -115,12 +85,12 @@ HTML_TEMPLATE = """
             <div>
                 <div class="flex flex-wrap items-center gap-3">
                     <span class="text-2xl font-bold text-cyan-400">⚡ PasarGuard Deployer</span>
-                    <span class="bg-emerald-500/20 text-emerald-400 text-xs px-2.5 py-1 rounded border border-emerald-500/40">IP Mode Only</span>
-                    <span class="bg-amber-500/20 text-amber-300 text-xs px-2.5 py-1 rounded border border-amber-500/40">🖥️ http://{{ master_ip }}:{{ web_conf.port }}</span>
+                    <span class="bg-emerald-500/20 text-emerald-400 text-xs px-2.5 py-1 rounded border border-emerald-500/40">v0.9.9 Stable</span>
+                    <span class="bg-amber-500/20 text-amber-300 text-xs px-2.5 py-1 rounded border border-amber-500/40">http://{{ master_ip }}:{{ web_conf.port }}</span>
                 </div>
                 <p class="text-gray-400 text-xs mt-1">Automated Multi-Node & Multi-SSL Orchestrator by Saeed SK (@saeedsk32)</p>
             </div>
-            <div class="flex flex-wrap gap-2 text-xs">
+            <div class="flex gap-2 text-xs">
                 <button onclick="forceRefreshAll()" class="bg-cyan-600 hover:bg-cyan-500 text-white px-3.5 py-2 rounded font-bold btn">🔄 Force Refresh</button>
             </div>
         </div>
@@ -145,7 +115,7 @@ HTML_TEMPLATE = """
                 </div>
             </div>
             <div class="text-right text-[11px] text-gray-400">
-                <div>Browser Cache: <span id="cache-indicator" class="text-emerald-400 font-bold">⚡ Active</span></div>
+                <div>Browser Cache: <span class="text-emerald-400 font-bold">⚡ Active</span></div>
                 <div>Master IP: <span class="text-white">{{ master_ip }}</span></div>
             </div>
         </div>
@@ -169,7 +139,6 @@ HTML_TEMPLATE = """
                         <button onclick="nodeAction({{ idx }}, 'restart')" class="bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-2 rounded font-bold btn">♻️ Restart</button>
                         <button onclick="nodeAction({{ idx }}, 'update_xray')" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-2 rounded font-bold btn">📦 Update Xray</button>
                         <button onclick="nodeAction({{ idx }}, 'bbr_toggle')" class="bg-amber-600 hover:bg-amber-500 text-white text-xs px-3 py-2 rounded font-bold btn">🚀 Toggle BBR</button>
-                        <button onclick="migrateIpPrompt({{ idx }}, '{{ n.hostname }}', '{{ n.ip }}')" class="bg-purple-600 hover:bg-purple-500 text-white text-xs px-3 py-2 rounded font-bold btn">🔁 Migrate IP</button>
                         <button onclick="purgeNodePrompt({{ idx }}, '{{ n.hostname }}')" class="bg-red-600 hover:bg-red-500 text-white text-xs px-3 py-2 rounded font-bold btn">💣 Uninstall & Clean DNS</button>
                     </div>
                 </div>
@@ -240,7 +209,7 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
-        const CACHE_PREFIX = 'pg_deploy_ipmode_';
+        const CACHE_PREFIX = 'pg_deploy_v099_';
 
         function showToast(msg, isErr=false) {
             const t = document.getElementById('toast');
@@ -251,9 +220,7 @@ HTML_TEMPLATE = """
         }
 
         function setCache(key, data) {
-            try {
-                localStorage.setItem(CACHE_PREFIX + key, JSON.stringify({ts: Date.now(), data}));
-            } catch (e) {}
+            try { localStorage.setItem(CACHE_PREFIX + key, JSON.stringify({ts: Date.now(), data})); } catch (e) {}
         }
 
         function getCache(key, maxAgeMs = 300000) {
@@ -263,9 +230,7 @@ HTML_TEMPLATE = """
                 const parsed = JSON.parse(raw);
                 if (Date.now() - parsed.ts > maxAgeMs) return null;
                 return parsed.data;
-            } catch (e) {
-                return null;
-            }
+            } catch (e) { return null; }
         }
 
         function applyStatusToDom(idx, data) {
@@ -287,27 +252,21 @@ HTML_TEMPLATE = """
             const cacheKey = `node_status_${idx}`;
             if (!force) {
                 const cached = getCache(cacheKey);
-                if (cached) {
-                    applyStatusToDom(idx, cached);
-                }
+                if (cached) applyStatusToDom(idx, cached);
             }
             try {
                 const res = await fetch(`/api/node/${idx}/status${force ? '?force=1' : ''}`);
                 const data = await res.json();
                 setCache(cacheKey, data);
                 applyStatusToDom(idx, data);
-            } catch (e) {
-                console.error(e);
-            }
+            } catch (e) {}
         }
 
         function forceRefreshAll() {
             localStorage.clear();
             showToast('⚡ Clearing cache & fetching live node states...');
             const count = {{ nodes|length }};
-            for (let i = 0; i < count; i++) {
-                loadNodeStatus(i, true);
-            }
+            for (let i = 0; i < count; i++) loadNodeStatus(i, true);
         }
 
         function copyText(text) {
@@ -345,7 +304,7 @@ HTML_TEMPLATE = """
                     showToast(`✔ ${data.message}`);
                     localStorage.removeItem(CACHE_PREFIX + `node_status_${idx}`);
                     localStorage.removeItem(CACHE_PREFIX + `node_vault_${idx}`);
-                    if (action === 'purge_node' || action === 'migrate_ip') {
+                    if (action === 'purge_node') {
                         setTimeout(() => location.reload(), 1000);
                     } else {
                         loadNodeStatus(idx, true);
@@ -353,16 +312,7 @@ HTML_TEMPLATE = """
                 } else {
                     showToast(`✖ ${data.message}`, true);
                 }
-            } catch (e) {
-                showToast('✖ Action failed', true);
-            }
-        }
-
-        function migrateIpPrompt(idx, host, oldIp) {
-            const newIp = prompt(`Enter NEW Server IPv4 for ${host} (Current: ${oldIp}):`);
-            if (newIp && newIp.trim() !== '') {
-                nodeAction(idx, 'migrate_ip', {new_ip: newIp.trim()});
-            }
+            } catch (e) { showToast('✖ Action failed', true); }
         }
 
         function purgeNodePrompt(idx, host) {
@@ -434,10 +384,7 @@ HTML_TEMPLATE = """
             const cacheKey = `node_vault_${idx}`;
             if (!force) {
                 const cached = getCache(cacheKey, 600000);
-                if (cached) {
-                    renderVaultProfiles(cached);
-                    return;
-                }
+                if (cached) { renderVaultProfiles(cached); return; }
             }
 
             body.innerHTML = '<div class="text-center py-8 text-cyan-400">Scanning remote /var/lib/pg-node/certs/...</div>';
@@ -446,9 +393,7 @@ HTML_TEMPLATE = """
                 const data = await res.json();
                 setCache(cacheKey, data.profiles || []);
                 renderVaultProfiles(data.profiles || []);
-            } catch (e) {
-                body.innerHTML = '<div class="text-red-400">Failed to load vault details.</div>';
-            }
+            } catch (e) { body.innerHTML = '<div class="text-red-400">Failed to load vault details.</div>'; }
         }
 
         function closeVaultModal() {
@@ -459,9 +404,7 @@ HTML_TEMPLATE = """
 
         document.addEventListener('DOMContentLoaded', () => {
             const count = {{ nodes|length }};
-            for (let i = 0; i < count; i++) {
-                loadNodeStatus(i, false);
-            }
+            for (let i = 0; i < count; i++) loadNodeStatus(i, false);
         });
     </script>
 </body>
@@ -475,13 +418,7 @@ def index():
     domains = load_json(DOMAINS_FILE, [])
     web_conf = get_web_config()
     master_ip = get_master_ip()
-    resp = make_response(render_template_string(
-        HTML_TEMPLATE,
-        nodes=nodes,
-        domains=domains,
-        web_conf=web_conf,
-        master_ip=master_ip
-    ))
+    resp = make_response(render_template_string(HTML_TEMPLATE, nodes=nodes, domains=domains, web_conf=web_conf, master_ip=master_ip))
     resp.headers["Cache-Control"] = "private, max-age=15, stale-while-revalidate=60"
     return resp
 
@@ -491,18 +428,13 @@ def node_status(idx):
     force = request.args.get("force") == "1"
     now = time.time()
     if not force and idx in SERVER_CACHE["status"]:
-        cached_entry = SERVER_CACHE["status"][idx]
-        if now - cached_entry["ts"] < CACHE_TTL:
-            resp = make_response(jsonify(cached_entry["data"]))
-            resp.headers["Cache-Control"] = "private, max-age=30"
-            return resp
+        if now - SERVER_CACHE["status"][idx]["ts"] < CACHE_TTL:
+            return jsonify(SERVER_CACHE["status"][idx]["data"])
 
     nodes = load_json(NODES_FILE, [])
-    if idx < 0 or idx >= len(nodes):
-        return jsonify({"ok": False}), 404
+    if idx < 0 or idx >= len(nodes): return jsonify({"ok": False}), 404
     n = nodes[idx]
-    aport = n.get("api_port", 62051)
-    bdom = n.get("base_domain", "")
+    aport, bdom = n.get("api_port", 62051), n.get("base_domain", "")
     cmd = f"""
     export PATH=/usr/local/bin:$PATH
     echo "===CC==="
@@ -515,32 +447,19 @@ def node_status(idx):
     openssl x509 -in /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null || openssl x509 -in /var/lib/pg-node/certs/{bdom}/fullchain.pem 2>/dev/null || true
     """
     ok, out, _ = run_ssh(n, cmd, timeout=6)
-    if not ok:
-        res_data = {"online": False, "bbr": "Unreachable", "xray": "Unreachable", "leaf_cert": ""}
-        return jsonify(res_data)
+    if not ok: return jsonify({"online": False, "bbr": "Unreachable", "xray": "Unreachable", "leaf_cert": ""})
 
     parts = out.split("===")
     cc, port_st, xray_v, cert_str = "unknown", "STANDBY", "Unknown", ""
     for i in range(len(parts)):
-        if parts[i] == "CC" and i+1 < len(parts):
-            cc = parts[i+1].strip()
-        elif parts[i] == "PORT" and i+1 < len(parts):
-            port_st = parts[i+1].strip()
-        elif parts[i] == "XRAY" and i+1 < len(parts):
-            xray_v = parts[i+1].strip()
-        elif parts[i] == "CERT" and i+1 < len(parts):
-            cert_str = parts[i+1].strip()
+        if parts[i] == "CC" and i+1 < len(parts): cc = parts[i+1].strip()
+        elif parts[i] == "PORT" and i+1 < len(parts): port_st = parts[i+1].strip()
+        elif parts[i] == "XRAY" and i+1 < len(parts): xray_v = parts[i+1].strip()
+        elif parts[i] == "CERT" and i+1 < len(parts): cert_str = parts[i+1].strip()
 
-    res_data = {
-        "online": port_st == "ONLINE",
-        "bbr": f"Active ({cc})" if "bbr" in cc else cc,
-        "xray": xray_v or "Unknown",
-        "leaf_cert": cert_str
-    }
+    res_data = {"online": port_st == "ONLINE", "bbr": f"Active ({cc})" if "bbr" in cc else cc, "xray": xray_v or "Unknown", "leaf_cert": cert_str}
     SERVER_CACHE["status"][idx] = {"ts": now, "data": res_data}
-    resp = make_response(jsonify(res_data))
-    resp.headers["Cache-Control"] = "private, max-age=30"
-    return resp
+    return jsonify(res_data)
 
 @app.route("/api/node/<int:idx>/vault")
 @requires_auth
@@ -548,26 +467,20 @@ def node_vault(idx):
     force = request.args.get("force") == "1"
     now = time.time()
     if not force and idx in SERVER_CACHE["vault"]:
-        cached_entry = SERVER_CACHE["vault"][idx]
-        if now - cached_entry["ts"] < CACHE_TTL * 2:
-            resp = make_response(jsonify({"profiles": cached_entry["data"]}))
-            resp.headers["Cache-Control"] = "private, max-age=60"
-            return resp
+        if now - SERVER_CACHE["vault"][idx]["ts"] < CACHE_TTL * 2:
+            return jsonify({"profiles": SERVER_CACHE["vault"][idx]["data"]})
 
     nodes = load_json(NODES_FILE, [])
-    if idx < 0 or idx >= len(nodes):
-        return jsonify({"profiles": []}), 404
+    if idx < 0 or idx >= len(nodes): return jsonify({"profiles": []}), 404
     n = nodes[idx]
     ok, files_out, _ = run_ssh(n, "find /var/lib/pg-node/certs -type f \\( -name 'fullchain.pem' -o -name 'self_cert.pem' \\) 2>/dev/null | sort", timeout=8)
-    if not ok or not files_out:
-        return jsonify({"profiles": []})
+    if not ok or not files_out: return jsonify({"profiles": []})
 
     _, active_hash, _ = run_ssh(n, "md5sum /var/lib/pg-node/certs/ssl_cert.pem 2>/dev/null | awk '{print $1}'", timeout=5)
     profiles = []
     for cf in files_out.splitlines():
         cf = cf.strip()
-        if not cf:
-            continue
+        if not cf: continue
         kf = os.path.join(os.path.dirname(cf), "self_key.pem" if "self_cert.pem" in cf else "privkey.pem")
         cmd = f"""
         echo "===HASH==="
@@ -582,8 +495,7 @@ def node_vault(idx):
         cat "{kf}" 2>/dev/null
         """
         ok_p, p_out, _ = run_ssh(n, cmd, timeout=8)
-        if not ok_p:
-            continue
+        if not ok_p: continue
         segs = p_out.split("===")
         chash, subj, leaf, full, priv = "", "", "", "", ""
         for i in range(len(segs)):
@@ -594,28 +506,17 @@ def node_vault(idx):
             elif segs[i] == "KEY" and i+1 < len(segs): priv = segs[i+1].strip()
 
         levels = full.count("BEGIN CERTIFICATE") or 1
-        profiles.append({
-            "cert_path": cf,
-            "key_path": kf,
-            "subject": subj,
-            "levels": levels,
-            "active": bool(active_hash and chash == active_hash),
-            "leaf_cert": leaf,
-            "fullchain": full,
-            "privkey": priv
-        })
+        profiles.append({"cert_path": cf, "key_path": kf, "subject": subj, "levels": levels, "active": bool(active_hash and chash == active_hash), "leaf_cert": leaf, "fullchain": full, "privkey": priv})
+    
     SERVER_CACHE["vault"][idx] = {"ts": now, "data": profiles}
-    resp = make_response(jsonify({"profiles": profiles}))
-    resp.headers["Cache-Control"] = "private, max-age=60"
-    return resp
+    return jsonify({"profiles": profiles})
 
 @app.route("/api/node/<int:idx>/action", methods=["POST"])
 @requires_auth
 def node_action(idx):
     nodes = load_json(NODES_FILE, [])
     domains = load_json(DOMAINS_FILE, [])
-    if idx < 0 or idx >= len(nodes):
-        return jsonify({"ok": False, "message": "Invalid node index"}), 404
+    if idx < 0 or idx >= len(nodes): return jsonify({"ok": False, "message": "Invalid node index"}), 404
     n = nodes[idx]
     data = request.json or {}
     act = data.get("action")
@@ -626,11 +527,9 @@ def node_action(idx):
     if act == "restart":
         ok, _, _ = run_ssh(n, "export PATH=/usr/local/bin:$PATH; pg-node restart -y 2>/dev/null || docker restart node 2>/dev/null || true")
         return jsonify({"ok": ok, "message": "Node service restarted"})
-
     elif act == "update_xray":
         ok, _, _ = run_ssh(n, "export PATH=/usr/local/bin:$PATH; pg-node core-update --version latest -y 2>/dev/null || true", timeout=35)
         return jsonify({"ok": ok, "message": "Xray-core updated to latest version"})
-
     elif act == "bbr_toggle":
         _, cc, _ = run_ssh(n, "sysctl -n net.ipv4.tcp_congestion_control")
         if "bbr" in cc:
@@ -639,50 +538,20 @@ def node_action(idx):
         else:
             run_ssh(n, "modprobe tcp_bbr 2>/dev/null || true; echo 'net.core.default_qdisc=fq' > /etc/sysctl.d/99-bbr.conf; echo 'net.ipv4.tcp_congestion_control=bbr' >> /etc/sysctl.d/99-bbr.conf; sysctl --system >/dev/null 2>&1")
             return jsonify({"ok": True, "message": "TCP BBR enabled (fq + bbr)"})
-
-    elif act == "migrate_ip":
-        new_ip = data.get("new_ip", "").strip()
-        if not new_ip:
-            return jsonify({"ok": False, "message": "New IP required"})
-        bdom = n.get("base_domain")
-        dom_obj = next((d for d in domains if d.get("domain") == bdom), None)
-        if dom_obj:
-            def cf_upsert_record(zone_id, token, fqdn, ip, comment):
-                rec_type = "AAAA" if ":" in ip else "A"
-                get_cmd = ["curl", "-s", "-X", "GET", f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?name={fqdn}&type={rec_type}", "-H", f"Authorization: Bearer {token}", "-H", "Content-Type: application/json"]
-                res = subprocess.run(get_cmd, capture_output=True, text=True)
-                rec_id = ""
-                try:
-                    items = json.loads(res.stdout).get("result", [])
-                    if items: rec_id = items[0].get("id", "")
-                except Exception: pass
-                payload = json.dumps({"type": rec_type, "name": fqdn, "content": ip, "ttl": 1, "proxied": False, "comment": comment})
-                if rec_id:
-                    subprocess.run(["curl", "-s", "-X", "PUT", f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{rec_id}", "-H", f"Authorization: Bearer {token}", "-H", "Content-Type: application/json", "--data", payload], capture_output=True)
-                else:
-                    subprocess.run(["curl", "-s", "-X", "POST", f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records", "-H", f"Authorization: Bearer {token}", "-H", "Content-Type: application/json", "--data", payload], capture_output=True)
-            cf_upsert_record(dom_obj["zone_id"], dom_obj["token"], n.get("address"), new_ip, f"PG-Node: {n.get('hostname')} | Migrated")
-        nodes[idx]["ip"] = new_ip
-        save_json(NODES_FILE, nodes)
-        return jsonify({"ok": True, "message": f"Migrated node IP to {new_ip}"})
-
     elif act == "purge_node":
         sport = n.get("service_port", 62050)
         run_ssh(n, f"export PATH=/usr/local/bin:$PATH; echo -e 'y\\ny' | pg-node uninstall 2>/dev/null || true; docker rm -f node 2>/dev/null || true; systemctl stop pg-node pg-node-service 2>/dev/null || true; rm -rf /opt/pg-node /var/lib/pg-node /usr/local/bin/pg-node /usr/bin/pg-node /etc/systemd/system/pg-node*.service; ufw delete allow {sport}/tcp 2>/dev/null || true", timeout=20)
         bdom = n.get("base_domain")
         dom_obj = next((d for d in domains if d.get("domain") == bdom), None)
         if dom_obj:
-            zid = dom_obj["zone_id"]
-            tok = dom_obj["token"]
+            zid, tok = dom_obj["zone_id"], dom_obj["token"]
             for rec_entry in n.get("dns_records", []):
                 fqdn = rec_entry.split()[0].strip()
-                get_cmd = ["curl", "-s", "-X", "GET", f"https://api.cloudflare.com/client/v4/zones/{zid}/dns_records?name={fqdn}", "-H", f"Authorization: Bearer {tok}", "-H", "Content-Type: application/json"]
-                res = subprocess.run(get_cmd, capture_output=True, text=True)
+                res = subprocess.run(["curl", "-s", "-X", "GET", f"https://api.cloudflare.com/client/v4/zones/{zid}/dns_records?name={fqdn}", "-H", f"Authorization: Bearer {tok}", "-H", "Content-Type: application/json"], capture_output=True, text=True)
                 try:
                     for it in json.loads(res.stdout).get("result", []):
                         rid = it.get("id")
-                        if rid:
-                            subprocess.run(["curl", "-s", "-X", "DELETE", f"https://api.cloudflare.com/client/v4/zones/{zid}/dns_records/{rid}", "-H", f"Authorization: Bearer {tok}", "-H", "Content-Type: application/json"], capture_output=True)
+                        if rid: subprocess.run(["curl", "-s", "-X", "DELETE", f"https://api.cloudflare.com/client/v4/zones/{zid}/dns_records/{rid}", "-H", f"Authorization: Bearer {tok}", "-H", "Content-Type: application/json"], capture_output=True)
                 except Exception: pass
         nodes.pop(idx)
         save_json(NODES_FILE, nodes)
@@ -693,4 +562,4 @@ def node_action(idx):
 if __name__ == "__main__":
     conf = get_web_config()
     port = int(conf.get("port", 5050))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, debug=False)
