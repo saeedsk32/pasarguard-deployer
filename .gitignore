@@ -4,3 +4,4 @@ config.env
 deployer.log
 *.tmp
 *.ini
+web_config.json
