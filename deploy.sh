@@ -1,4 +1,6 @@
 #!/bin/bash
+APP_DIR="/root/pasarguard-deployer"
+cd "$APP_DIR" || exit 1
 # ==============================================================================
 # PasarGuard Multi-Node Auto-Deployer (Modular Production v1.0)
 # Developed by Saeed SK (@saeedsk32)
